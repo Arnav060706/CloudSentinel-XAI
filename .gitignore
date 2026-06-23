@@ -1,2 +1,5 @@
 # Virtual environments
 env/
+
+# Prometheus db
+data/
