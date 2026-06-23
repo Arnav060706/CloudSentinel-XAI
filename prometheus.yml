@@ -4,7 +4,7 @@ global:
   evaluation_interval: 1s
 
 scrape_configs:
-  - job_name: "CloudSentinel-XAI Monitoring"
+  - job_name: "CloudSentinel-XAI Dashboard"
     static_configs:
       - targets: ["localhost:8000"]
         labels:
