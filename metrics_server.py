@@ -25,7 +25,7 @@ PIPELINE_THROUGHPUT = Counter(
 NARRATIVE_EXPORTER = Gauge(
     'security_triage_narrative_info',
     'Current active natural language triage narrative from local LLM',
-    ['user_identity', 'cloud_provider', 'event_action', 'risk_score', 'narrative_text']
+    ['alert_id','user_identity', 'cloud_provider', 'event_action', 'risk_score', 'narrative_text']
 )
 
 def run_security_pipeline():
@@ -58,7 +58,7 @@ def run_security_pipeline():
             
             print(f"Anomaly Detected! IsoForest: {iso_forest_risk}, XGBoost: {xgboost_risk} | Trust Decayed to: {current_trust:.2f}")
             #Trigger the local LLM if trust drops below 60
-            if current_trust < 60:
+            if current_trust < 50:
                 print("\n[!] Trust score in critical boundary. Querying local XAI LLM Aggregator...")
                 #packaging current runtime metrics into a mock shap vector
                 current_shap = {
@@ -73,8 +73,11 @@ def run_security_pipeline():
                 )
                 #print(f"LLM Triage Report:\n{narrative}")
                 clean_narrative = narrative.replace('"', "'").replace('\n', ' ')
+                # Generate a unique short string ID for this specific clock tick
+                unique_alert_id = f"ALERT-{int(time.time())}"
                 NARRATIVE_EXPORTER.clear()
                 NARRATIVE_EXPORTER.labels(
+                    alert_id=unique_alert_id,
                     user_identity="dev-user-01",
                     cloud_provider="AWS",
                     event_action="UpdateAssumeRolePolicy",
