@@ -1,0 +1,24 @@
+[
+  {
+    "source": "AWS",
+    "payload": {
+      "eventTime": "2026-06-25T14:30:00Z",
+      "eventType": "AwsApiCall",
+      "userIdentity": {"arn": "arn:aws:iam::123456789012:user/admin"},
+      "sourceIPAddress": "192.168.1.150",
+      "eventName": "DeleteVpc",
+      "errorCode": "AccessDenied",
+      "severity": "ERROR",
+      "resources": [{"ARN": "vpc-0abcd1234"}]
+    }
+  },
+  {
+    "_comment": "This log entry has an invalid timestamp format to test the normalization function.",
+    "source": "AWS",
+    "payload": {
+      "eventTime": "Invalid_Time_Format",
+      "eventType": "AwsApiCall",
+      "sourceIPAddress": "999.999.999.999" 
+    }
+  }
+]
