@@ -6,8 +6,7 @@ env/
 data/
 
 #Pycache files
-aggregator/__pycache__/*
-parser_normalizer/src/__pycache__/*
+**/_pycache_/
 
 # Loki runtime database chunks and indices
 data/
