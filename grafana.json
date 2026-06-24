@@ -37,7 +37,7 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "ffq2ixds39wjkc"
+                      "name": "efpyykjlib11cd"
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
@@ -74,7 +74,7 @@
               "defaults": {
                 "color": {
                   "fixedColor": "#52c621",
-                  "mode": "shades"
+                  "mode": "thresholds"
                 },
                 "decimals": 0,
                 "displayName": "Trust score",
@@ -83,12 +83,24 @@
                   "mode": "absolute",
                   "steps": [
                     {
-                      "color": "purple",
+                      "color": "dark-red",
                       "value": 0
                     },
                     {
-                      "color": "red",
-                      "value": 80
+                      "color": "dark-red",
+                      "value": 20
+                    },
+                    {
+                      "color": "semi-dark-orange",
+                      "value": 30
+                    },
+                    {
+                      "color": "#EAB839",
+                      "value": 40
+                    },
+                    {
+                      "color": "green",
+                      "value": 100
                     }
                   ]
                 }
@@ -141,7 +153,7 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "ffq2ixds39wjkc"
+                      "name": "efpyykjlib11cd"
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
@@ -259,7 +271,7 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "ffq2ixds39wjkc"
+                      "name": "efpyykjlib11cd"
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
@@ -344,7 +356,7 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "ffq2ixds39wjkc"
+                      "name": "efpyykjlib11cd"
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
