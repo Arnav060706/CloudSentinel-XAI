@@ -1,6 +1,7 @@
 import time
 import random
 from prometheus_client import start_http_server, Gauge, Counter
+from aggregator.xai_triage import generate_soc_narrative
 
 # 1. Stateful Trust Layer Metric (Layer 4)
 USER_TRUST_GAUGE = Gauge(
@@ -19,6 +20,12 @@ ENGINE_RISK_PROBABILITY = Gauge(
 PIPELINE_THROUGHPUT = Counter(
     'security_pipeline_processed_events_total',
     'Total number of multi-cloud log events processed by the core normalization pipeline'
+)
+
+NARRATIVE_EXPORTER = Gauge(
+    'security_triage_narrative_info',
+    'Current active natural language triage narrative from local LLM',
+    ['user_identity', 'cloud_provider', 'event_action', 'risk_score', 'narrative_text']
 )
 
 def run_security_pipeline():
@@ -50,6 +57,30 @@ def run_security_pipeline():
             current_trust = max(0.0, current_trust - deduction)
             
             print(f"Anomaly Detected! IsoForest: {iso_forest_risk}, XGBoost: {xgboost_risk} | Trust Decayed to: {current_trust:.2f}")
+            #Trigger the local LLM if trust drops below 60
+            if current_trust < 60:
+                print("\n[!] Trust score in critical boundary. Querying local XAI LLM Aggregator...")
+                #packaging current runtime metrics into a mock shap vector
+                current_shap = {
+                    "isolation_forest_anamoly_probability": iso_forest_risk,
+                    "xgboost_threat_confidnece": xgboost_risk
+                }
+                narrative = generate_soc_narrative(
+                    cloud_provider="AWS",
+                    event_name="AttachUserPolicy",
+                    risk_score=int((iso_forest_risk*100)),
+                    shap_features=current_shap
+                )
+                #print(f"LLM Triage Report:\n{narrative}")
+                clean_narrative = narrative.replace('"', "'").replace('\n', ' ')
+                NARRATIVE_EXPORTER.clear()
+                NARRATIVE_EXPORTER.labels(
+                    user_identity="dev-user-01",
+                    cloud_provider="AWS",
+                    event_action="UpdateAssumeRolePolicy",
+                    risk_score="87.5",
+                    narrative_text=clean_narrative
+                ).set(1)
         else:
             # Benign cycle: Engines report low risk, trust slowly recovers (+1)
             iso_forest_risk = round(random.uniform(0.01, 0.15), 2)
