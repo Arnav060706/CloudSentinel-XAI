@@ -7,3 +7,10 @@ data/
 
 #Pycache files
 aggregator/__pycache__/*
+
+# Loki runtime database chunks and indices
+data/
+/tmp/
+loki-storage/
+*.db
+*.db-journal

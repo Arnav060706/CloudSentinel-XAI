@@ -21,7 +21,7 @@
     }
   ],
   "cursorSync": "Off",
-  "description": "Tested the dashboard with Prometheus ",
+  "description": "Dashboard for multi-cloud xai-llm security",
   "editable": true,
   "elements": {
     "panel-1": {
@@ -37,7 +37,7 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "efpyykjlib11cd"
+                      "name": "dfpz2c7m6dj40c"
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
@@ -74,7 +74,7 @@
               "defaults": {
                 "color": {
                   "fixedColor": "#52c621",
-                  "mode": "thresholds"
+                  "mode": "shades"
                 },
                 "decimals": 0,
                 "displayName": "Trust score",
@@ -83,24 +83,12 @@
                   "mode": "absolute",
                   "steps": [
                     {
-                      "color": "dark-red",
+                      "color": "purple",
                       "value": 0
                     },
                     {
-                      "color": "dark-red",
-                      "value": 20
-                    },
-                    {
-                      "color": "semi-dark-orange",
-                      "value": 30
-                    },
-                    {
-                      "color": "#EAB839",
-                      "value": 40
-                    },
-                    {
-                      "color": "green",
-                      "value": 100
+                      "color": "red",
+                      "value": 80
                     }
                   ]
                 }
@@ -153,7 +141,7 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "efpyykjlib11cd"
+                      "name": "dfpz2c7m6dj40c"
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
@@ -271,7 +259,7 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "efpyykjlib11cd"
+                      "name": "dfpz2c7m6dj40c"
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
@@ -356,15 +344,16 @@
                   "hidden": false,
                   "query": {
                     "datasource": {
-                      "name": "efpyykjlib11cd"
+                      "name": "ffq3palc6nbi8e"
                     },
-                    "group": "prometheus",
+                    "group": "loki",
                     "kind": "DataQuery",
                     "spec": {
-                      "editorMode": "builder",
-                      "expr": "security_triage_narrative_info == 1",
-                      "legendFormat": "__auto",
-                      "range": true
+                      "direction": "backward",
+                      "editorMode": "code",
+                      "expr": "{job=\"security-triage-pipeline\"}",
+                      "legendFormat": "",
+                      "queryType": "range"
                     },
                     "version": "v0"
                   },
@@ -375,15 +364,50 @@
             "queryOptions": {},
             "transformations": [
               {
-                "group": "labelsToFields",
+                "group": "extractFields",
                 "kind": "Transformation",
                 "spec": {
                   "options": {
-                    "keepLabels": [
-                      "narrative_text",
-                      "user_identity",
-                      "cloud_provider"
-                    ]
+                    "delimiter": ",",
+                    "format": "json",
+                    "keepTime": false,
+                    "replace": false,
+                    "source": "labels"
+                  }
+                }
+              },
+              {
+                "group": "organize",
+                "kind": "Transformation",
+                "spec": {
+                  "options": {
+                    "excludeByName": {
+                      "id": true,
+                      "job": true,
+                      "labelTypes": true,
+                      "labels": true,
+                      "service_name": true,
+                      "tsNs": true
+                    },
+                    "includeByName": {},
+                    "indexByName": {
+                      "Line": 12,
+                      "Time": 1,
+                      "cloud_provider": 5,
+                      "detected_level": 6,
+                      "event_action": 7,
+                      "id": 4,
+                      "job": 8,
+                      "labelTypes": 3,
+                      "labels": 0,
+                      "risk_score": 9,
+                      "service_name": 10,
+                      "tsNs": 2,
+                      "user_identity": 11
+                    },
+                    "renameByName": {
+                      "Line": "Triage Report"
+                    }
                   }
                 }
               }
@@ -449,7 +473,7 @@
                   "properties": [
                     {
                       "id": "custom.width",
-                      "value": 103
+                      "value": 131
                     }
                   ]
                 },
@@ -464,6 +488,78 @@
                       "value": 850
                     }
                   ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "Time"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 165
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "labels"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 257
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "detected_level"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 134
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "risk_score"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 70
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "event_action"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 196
+                    }
+                  ]
+                },
+                {
+                  "matcher": {
+                    "id": "byName",
+                    "options": "user_identity"
+                  },
+                  "properties": [
+                    {
+                      "id": "custom.width",
+                      "value": 140
+                    }
+                  ]
                 }
               ]
             },
@@ -472,7 +568,7 @@
               "showHeader": true,
               "sortBy": [
                 {
-                  "desc": false,
+                  "desc": true,
                   "displayName": "user_identity"
                 }
               ]
@@ -574,6 +670,6 @@
     "timezone": "browser",
     "to": "now"
   },
-  "title": "Test dashboard- 2",
+  "title": "Cloud-Sentinel",
   "variables": []
 }
