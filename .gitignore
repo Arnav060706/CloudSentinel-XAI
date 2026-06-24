@@ -3,3 +3,6 @@ env/
 
 # Prometheus db
 data/
+
+#Pycache files
+aggregator/__pycache__/*
