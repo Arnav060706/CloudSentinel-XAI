@@ -1,0 +1,28 @@
+[
+  {
+    "time": "2026-06-10T08:20:14Z",
+    "category": "SignInLogs",
+    "operationName": "Sign-in activity",
+    "resultType": "0",
+    "callerIpAddress": "203.0.113.10",
+    "properties": {
+      "userPrincipalName": "alice.chen@corp-example.com",
+      "appDisplayName": "Microsoft Azure"
+    },
+    "ml_labels": {
+      "anomaly_flag": false,
+      "severity_score": 0.05
+    }
+  },
+  {
+    "_comment": "This log has an invalid IP address to test Pydantic validation failure.",
+    "time": "2026-06-10T09:00:00Z",
+    "category": "SignInLogs",
+    "operationName": "Sign-in activity",
+    "resultType": "0",
+    "callerIpAddress": "Not-An-IP-Address",
+    "properties": {
+      "userPrincipalName": "bob.smith@corp-example.com"
+    }
+  }
+]

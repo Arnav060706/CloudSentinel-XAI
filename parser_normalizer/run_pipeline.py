@@ -1,44 +1,73 @@
 import json
 from src.pipeline import ParserPipeline
 
+def load_json(filepath):
+    """Safely load JSON logs."""
+    try:
+        with open(filepath, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"WARNING: {filepath} not found. Skipping...")
+        return []
+
 def main():
-    # Initializing the pipeline
     pipeline = ParserPipeline()
 
-    print("=" * 60)
-    print("STARTING ZERO-TRUST LOG INGESTION & NORMALIZATION PIPELINE")
-    print("=" * 60)
+    print("=" * 70)
+    print("STARTING TRI-CLOUD LOG INGESTION & NORMALIZATION PIPELINE (SAMPLE DATA)")
+    print("=" * 70)
 
-    # Loading mock logs from json file
-    try:
-        with open("mock_data/sample_logs.json", "r") as f:
-            mock_entries = json.load(f)
-    except FileNotFoundError:
-        print("ERROR: mock_data/sample_logs.json not found. Please create it first.")
+    # 1. Load logs using the exact filenames from your screenshot
+    aws_logs = load_json("mock_data/sample_logs_aws.json")
+    azure_logs = load_json("mock_data/sample_azure.json")
+    gcp_logs = load_json("mock_data/sample_gcp.json")
+
+    if not any([aws_logs, azure_logs, gcp_logs]):
+        print("ERROR: No logs found. Please check your mock_data folder.")
         return
 
-    # Iterating and processing each log through the pipeline
-    for idx, entry in enumerate(mock_entries, 1):
-        cloud_source = entry.get("source", "UNKNOWN")
-        payload = entry.get("payload", {})
+    # 2. Combine into a unified stream
+    unified_stream = []
+    
+    for log in aws_logs:
+        payload = log.get("payload", log) if isinstance(log, dict) and "payload" in log else log
+        unified_stream.append(("AWS", payload))
         
-        print(f"\n[Processing Log #{idx}] Source: {cloud_source}")
+    for log in azure_logs:
+        unified_stream.append(("AZURE", log))
         
-        # Run through parser, normalizer, and Pydantic validator
-        normalized_record = pipeline.process_log(cloud_source, payload)
+    for log in gcp_logs:
+        unified_stream.append(("GCP", log))
+
+    print(f"Loaded {len(aws_logs)} AWS, {len(azure_logs)} Azure, and {len(gcp_logs)} GCP logs.\n")
+
+    successful_logs = []
+
+    # 3. Process Stream
+    for idx, (cloud_source, raw_log) in enumerate(unified_stream, 1):
+        print(f"\n[Processing Log #{idx}] Routing to: {cloud_source} Parser")
+        
+        normalized_record = pipeline.process_log(cloud_source, raw_log)
         
         if normalized_record:
-            print("Status: SUCCESS ✅")
-            # model_dump_json() serializes the Pydantic model into a clean JSON string
-            print(normalized_record.model_dump_json(indent=2))
+            print("Status: SUCCESS")
+            print(normalized_record.model_dump_json(indent=2, exclude={"raw_log"}))
+            successful_logs.append(normalized_record)
         else:
-            print("Status: FAILED ❌ (To be sent to failed logs store (Yet to be configured))")
+            print("Status: FAILED (Added to failed logs store)")
 
-    # 3. Inspect the validation failure store
-    print("\n" + "=" * 60)
-    print(f"PIPELINE SUMMARY - FAILED LOGS STORE ({len(pipeline.failed_logs_store)} Records)")
-    print("=" * 60)
-    print(json.dumps(pipeline.failed_logs_store, indent=2))
+    # 4. Final Summary
+    print("\n" + "=" * 70)
+    print("TRI-CLOUD PIPELINE SUMMARY")
+    print("=" * 70)
+    print(f"Total Logs Processed: {len(unified_stream)}")
+    print(f"Successful Validations: {len(successful_logs)}")
+    print(f"Failed Validations: {len(pipeline.failed_logs_store)}")
+    
+    if pipeline.failed_logs_store:
+        print("\n--- Failed Logs Details ---")
+        for fail in pipeline.failed_logs_store:
+            print(f"Error: {fail['error']}")
 
 if __name__ == "__main__":
     main()

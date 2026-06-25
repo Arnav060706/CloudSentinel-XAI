@@ -2,6 +2,8 @@ import logging
 from pydantic import ValidationError
 from src.schema import UnifiedLogModel
 from src.parsers.aws_parser import AWSCloudTrailParser
+from src.parsers.azure_parser import AzureActivityParser
+from src.parsers.gcp_parser import GCPCloudAuditParser  # <-- Added GCP Import
 from src.metrics import LOGS_RECEIVED, LOGS_NORMALIZED, LOGS_FAILED, PROCESS_TIME
 
 logging.basicConfig(level=logging.INFO)
@@ -12,9 +14,10 @@ class ParserPipeline:
         # Router logic: map cloud source to parser instance
         self.parsers = {
             "AWS": AWSCloudTrailParser(),
-            # "AZURE": AzureActivityParser(), to be added later on
+            "AZURE": AzureActivityParser(),
+            "GCP": GCPCloudAuditParser(),  # <-- Added GCP Router
         }
-        self.failed_logs_store = [] # Separate storage for failures
+        self.failed_logs_store = [] 
 
     @PROCESS_TIME.time()
     def process_log(self, source_cloud: str, raw_log: dict) -> UnifiedLogModel | None:

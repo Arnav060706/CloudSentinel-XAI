@@ -1,0 +1,36 @@
+[
+  {
+    "insertId": "evt-gcp-sample-001",
+    "logName": "projects/proj-alpha-112233/logs/cloudaudit.googleapis.com%2Factivity",
+    "timestamp": "2026-06-10T08:30:00Z",
+    "severity": "NOTICE",
+    "protoPayload": {
+      "methodName": "SetIamPolicy",
+      "authenticationInfo": {
+        "principalEmail": "alice.chen@corp-example.com"
+      },
+      "requestMetadata": {
+        "callerIp": "203.0.113.45"
+      },
+      "resourceName": "projects/proj-alpha-112233"
+    },
+    "ml_labels": {
+      "severity_score": 0.1
+    }
+  },
+  {
+    "_comment": "This log is entirely missing the required timestamp to test Pydantic validation failure.",
+    "insertId": "evt-gcp-sample-002",
+    "logName": "projects/proj-alpha-112233/logs/cloudaudit.googleapis.com%2Factivity",
+    "severity": "NOTICE",
+    "protoPayload": {
+      "methodName": "SetIamPolicy",
+      "authenticationInfo": {
+        "principalEmail": "bob.smith@corp-example.com"
+      },
+      "requestMetadata": {
+        "callerIp": "203.0.113.45"
+      }
+    }
+  }
+]
