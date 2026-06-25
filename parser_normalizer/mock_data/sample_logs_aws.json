@@ -13,7 +13,6 @@
     }
   },
   {
-    "_comment": "This log entry has an invalid timestamp format to test the normalization function.",
     "source": "AWS",
     "payload": {
       "eventTime": "Invalid_Time_Format",
