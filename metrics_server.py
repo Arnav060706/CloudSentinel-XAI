@@ -3,7 +3,6 @@ import random
 import requests
 from prometheus_client import start_http_server, Gauge, Counter
 from aggregator.xai_triage import generate_soc_narrative
-import sqlite3
 
 # 1. Stateful Trust Layer Metric (Layer 4)
 USER_TRUST_GAUGE = Gauge(
@@ -116,27 +115,6 @@ def run_security_pipeline():
                     risk=87,
                     narrative_text=clean_narrative
                 )
-                #unique_alert_id = f"ALERT-{int(time.time())}"
-                # conn = sqlite3.connect("xai_logs.db")
-                # cursor = conn.cursor()
-                # cursor.execute('''
-                #     INSERT INTO security_alerts (alert_id, user_identity, engine_source, risk_score, timestamp)
-                #     VALUES (?, ?, ?, ?, ?)
-                #     ''', (unique_alert_id, user_id, "Llama3.2-XAI", int(iso_forest_risk * 100), time.time()))
-                # conn.commit()
-                # conn.close()
-                #print(f"LLM Triage Report:\n{narrative}")
-                # # Generate a unique short string ID for this specific clock tick
-                # 
-                # NARRATIVE_EXPORTER.clear()
-                # NARRATIVE_EXPORTER.labels(
-                #     alert_id=unique_alert_id,
-                #     user_identity="dev-user-01",
-                #     cloud_provider="AWS",
-                #     event_action="UpdateAssumeRolePolicy",
-                #     risk_score="87.5",
-                #     narrative_text=clean_narrative
-                # ).set(1)
         else:
             # Benign cycle: Engines report low risk, trust slowly recovers (+1)
             iso_forest_risk = round(random.uniform(0.01, 0.15), 2)
