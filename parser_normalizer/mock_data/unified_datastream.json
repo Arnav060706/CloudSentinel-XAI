@@ -3,40 +3,143 @@
     "eventVersion": "1.08",
     "userIdentity": {
       "type": "IAMUser",
-      "arn": "arn:aws:iam::112233445566:user/alice.chen"
+      "principalId": "AIDAEXAMPLE001",
+      "arn": "arn:aws:iam::112233445566:user/alice.chen",
+      "accountId": "112233445566",
+      "userName": "alice.chen"
     },
     "eventTime": "2026-06-10T08:14:32Z",
+    "eventSource": "signin.amazonaws.com",
     "eventName": "ConsoleLogin",
+    "awsRegion": "us-east-1",
     "sourceIPAddress": "203.0.113.45",
-    "severity_score": 0.05
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "requestParameters": null,
+    "responseElements": {
+      "ConsoleLogin": "Success"
+    },
+    "additionalEventData": {
+      "MFAUsed": "Yes",
+      "MFAIdentifier": "arn:aws:iam::112233445566:mfa/alice.chen",
+      "LoginTo": "https://console.aws.amazon.com/console/home"
+    },
+    "eventID": "evt-aws-001",
+    "eventType": "AwsConsoleSignIn",
+    "readOnly": false,
+    "managementEvent": true,
+    "ml_labels": {
+      "anomaly_flag": false,
+      "threat_category": "Normal",
+      "severity_score": 0.05
+    }
   },
   {
     "time": "2026-06-10T08:20:14Z",
     "category": "SignInLogs",
     "operationName": "Sign-in activity",
+    "resultType": "0",
+    "resultDescription": "Success",
     "callerIpAddress": "203.0.113.10",
+    "tenantId": "aaaabbbb-1111-2222-3333-ccccddddeeee",
     "properties": {
-      "userPrincipalName": "bob.smith@corp-example.com"
+      "id": "evt-az-001",
+      "createdDateTime": "2026-06-10T08:20:14Z",
+      "userDisplayName": "Alice Chen",
+      "userPrincipalName": "alice.chen@corp-example.com",
+      "userId": "user-guid-001",
+      "appId": "00000002-0000-0ff1-ce00-000000000000",
+      "appDisplayName": "Microsoft Azure",
+      "ipAddress": "203.0.113.10",
+      "clientAppUsed": "Browser",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      "status": {
+        "errorCode": 0,
+        "failureReason": null
+      },
+      "deviceDetail": {
+        "deviceId": "device-guid-001",
+        "displayName": "ALICE-LAPTOP",
+        "operatingSystem": "Windows 10",
+        "browser": "Edge 115.0",
+        "isCompliant": true,
+        "isManaged": true
+      },
+      "location": {
+        "city": "San Jose",
+        "state": "California",
+        "countryOrRegion": "US",
+        "geoCoordinates": {
+          "latitude": 37.3382,
+          "longitude": -121.8863
+        }
+      },
+      "mfaDetail": {
+        "authMethod": "Phone Sign-in",
+        "authDetail": "MFA completed"
+      },
+      "conditionalAccessStatus": "success",
+      "riskDetail": "none",
+      "riskLevelAggregated": "none",
+      "riskLevelDuringSignIn": "none",
+      "riskState": "none"
     },
     "ml_labels": {
-      "severity_score": 0.85
+      "anomaly_flag": false,
+      "threat_category": "Normal",
+      "severity_score": 0.05
     }
   },
   {
-    "insertId": "evt-gcp-sample-001",
+    "insertId": "evt-gcp-001",
+    "logName": "projects/proj-alpha-112233/logs/cloudaudit.googleapis.com%2Factivity",
     "timestamp": "2026-06-10T08:30:00Z",
     "severity": "NOTICE",
+    "resource": {
+      "type": "project",
+      "labels": {
+        "project_id": "proj-alpha-112233"
+      }
+    },
     "protoPayload": {
+      "@type": "type.googleapis.com/google.cloud.audit.AuditLog",
+      "serviceName": "cloudresourcemanager.googleapis.com",
       "methodName": "SetIamPolicy",
+      "resourceName": "projects/proj-alpha-112233",
       "authenticationInfo": {
-        "principalEmail": "carol.jones@corp-example.com"
+        "principalEmail": "alice.chen@corp-example.com",
+        "principalSubject": "user:alice.chen@corp-example.com"
       },
       "requestMetadata": {
-        "callerIp": "203.0.113.45"
+        "callerIp": "203.0.113.45",
+        "callerSuppliedUserAgent": "google-cloud-sdk/471.0.0 command/gcloud"
       },
-      "resourceName": "projects/proj-alpha-112233"
+      "authorizationInfo": [
+        {
+          "resource": "projects/proj-alpha-112233",
+          "permission": "resourcemanager.projects.setIamPolicy",
+          "granted": true
+        }
+      ],
+      "request": {
+        "policy": {
+          "bindings": [
+            {
+              "role": "roles/editor",
+              "members": [
+                "user:dan.wu@corp-example.com"
+              ]
+            }
+          ]
+        },
+        "@type": "type.googleapis.com/google.iam.v1.SetIamPolicyRequest"
+      },
+      "response": {
+        "@type": "type.googleapis.com/google.iam.v1.Policy"
+      }
     },
     "ml_labels": {
+      "anomaly_flag": false,
+      "threat_category": "Normal",
       "severity_score": 0.1
     }
   }

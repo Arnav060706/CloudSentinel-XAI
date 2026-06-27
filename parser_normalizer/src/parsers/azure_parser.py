@@ -1,8 +1,8 @@
-from src.parsers.base import BaseParser
-from src.normalizer import normalize_timestamp, normalize_severity
+#from src.parsers.base import BaseParser
+from src.normalizer import normalize_timestamp
 from typing import Any
 
-class AzureActivityParser(BaseParser):
+class AzureActivityParser:
     def parse(self, raw_log: dict[str, Any]) -> dict[str, Any]:
         # 1. Extract Timestamp
         time_str = raw_log.get("time", "")
@@ -45,22 +45,6 @@ class AzureActivityParser(BaseParser):
             if target_resources and isinstance(target_resources, list):
                 resource = target_resources[0].get("displayName") or target_resources[0].get("id", "Unknown")
 
-        # 6. Determine Severity
-        # Azure AD logs don't explicitly output "ERROR" or "CRITICAL", so we map them 
-        # using the result status and the ML anomaly scores.
-        raw_severity = "INFORMATIONAL"
-        if status == "FAILED":
-            raw_severity = "ERROR"
-            
-        # Upgrade severity if the ML labels indicate high risk
-        ml_labels = raw_log.get("ml_labels", {})
-        if ml_labels.get("anomaly_flag"):
-            score = ml_labels.get("severity_score", 0.0)
-            if score >= 0.8:
-                raw_severity = "CRITICAL"
-            elif score >= 0.5:
-                raw_severity = "WARNING"
-
         # 7. Return the structured dictionary for Pydantic validation
         return {
             "timestamp": timestamp,
@@ -72,6 +56,5 @@ class AzureActivityParser(BaseParser):
             "resource": resource,
             "action": action,
             "status": status,
-            "severity": normalize_severity("AZURE", raw_severity),
             "raw_log": raw_log
         }

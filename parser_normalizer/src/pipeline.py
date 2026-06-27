@@ -66,11 +66,7 @@ class ParserPipeline:
         return max(scores, key=scores.get)
 
     @PROCESS_TIME.time()
-    def process_log(
-        self,
-        raw_log: dict,
-        source_cloud: str = None,
-    ) -> UnifiedLogModel | None:
+    def process_log(self,raw_log: dict,source_cloud: str = None,) -> UnifiedLogModel | None:
 
         LOGS_RECEIVED.inc()
 

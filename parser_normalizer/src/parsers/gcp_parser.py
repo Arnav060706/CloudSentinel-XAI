@@ -17,19 +17,6 @@ class GCPCloudAuditParser:
             if "failure" in event_name:
                 status = "FAILED"
 
-        # Determine Severity based on ML labels
-        ml_labels = raw_log.get("ml_labels", {})
-        severity_score = ml_labels.get("severity_score", 0.0)
-        
-        if severity_score >= 0.9:
-            severity = "CRITICAL"
-        elif severity_score >= 0.7:
-            severity = "HIGH"
-        elif severity_score >= 0.4:
-            severity = "MEDIUM"
-        else:
-            severity = "LOW"
-
         return {
             "timestamp": raw_log.get("timestamp"),
             "source_cloud": "GCP",
@@ -40,6 +27,5 @@ class GCPCloudAuditParser:
             "resource": proto_payload.get("resourceName", "Unknown"),
             "action": proto_payload.get("methodName", "Unknown"),
             "status": status,
-            "severity": severity,
             "raw_log": raw_log
         }

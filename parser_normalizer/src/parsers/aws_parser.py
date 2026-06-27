@@ -1,8 +1,8 @@
-from src.parsers.base import BaseParser
-from src.normalizer import normalize_timestamp, normalize_severity_from_score
+#from src.parsers.base import BaseParser
+from src.normalizer import normalize_timestamp
 import json
 
-class AWSCloudTrailParser(BaseParser):
+class AWSCloudTrailParser:
     def parse(self, raw_log: dict) -> dict:
         
         # --- 1. Defensive User Identity Extraction ---
@@ -25,15 +25,6 @@ class AWSCloudTrailParser(BaseParser):
         # CloudTrail logs indicate failure via errorCode or errorMessage
         is_error = bool(raw_log.get("errorCode") or raw_log.get("errorMessage"))
         status = "FAILED" if is_error else "SUCCESS"
-        
-        # Use ML labels if available, otherwise infer from status
-        ml_labels = raw_log.get("ml_labels", {})
-        severity_score = ml_labels.get("severity_score", None)
-        
-        if severity_score is not None:
-            severity = normalize_severity_from_score(severity_score)
-        else:
-            severity = "HIGH" if is_error else "LOW"
 
         # --- 4. Return matching the Unified Schema ---
         return {
@@ -46,6 +37,5 @@ class AWSCloudTrailParser(BaseParser):
             "resource": resource,
             "action": raw_log.get("eventName", "Unknown"),
             "status": status,
-            "severity": severity,
             "raw_log": raw_log
         }

@@ -16,5 +16,4 @@ class UnifiedLogModel(BaseModel):
     resource: str
     action: str
     status: str
-    severity: str
     raw_log: dict[str, Any]
