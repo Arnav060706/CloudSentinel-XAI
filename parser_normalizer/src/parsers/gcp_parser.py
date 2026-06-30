@@ -1,31 +1,28 @@
 from typing import Any, Dict
+from src.normalizer import normalize_severity_from_score
 
 class GCPCloudAuditParser:
     def parse(self, raw_log: Dict[str, Any]) -> Dict[str, Any]:
-        proto_payload = raw_log.get("protoPayload", {})
+        proto = raw_log.get("protoPayload", {})
         
         # Determine Status
-        status = "SUCCESS"
-        # 1. Check for standard API errors
-        if "status" in proto_payload and proto_payload["status"].get("code", 0) != 0:
-            status = "FAILED"
-        # 2. Check for explicit Login failures
-        metadata = proto_payload.get("metadata", {})
-        events = metadata.get("event", [])
-        if events and isinstance(events, list):
-            event_name = events[0].get("eventName", "").lower()
-            if "failure" in event_name:
-                status = "FAILED"
+        status = "FAILED" if proto.get("status", {}).get("code", 0) != 0 else "SUCCESS"
+        
+        # Severity mapping using the central normalizer
+        score = raw_log.get("ml_labels", {}).get("severity_score", 0.0)
+        # GCP scores might need scaling to match the 1-4 range of normalize_severity_from_score
+        scaled_score = score * 5 
+        severity = normalize_severity_from_score(scaled_score)
 
         return {
             "timestamp": raw_log.get("timestamp"),
             "source_cloud": "GCP",
-            "event_type": proto_payload.get("methodName", "Unknown"),
-            "user_id": proto_payload.get("authenticationInfo", {}).get("principalEmail", "Unknown"),
-            "source_ip": proto_payload.get("requestMetadata", {}).get("callerIp"),
-            "destination_ip": None,
-            "resource": proto_payload.get("resourceName", "Unknown"),
-            "action": proto_payload.get("methodName", "Unknown"),
+            "event_type": proto.get("methodName", "Unknown"),
+            "user_id": proto.get("authenticationInfo", {}).get("principalEmail", "Unknown"),
+            "source_ip": proto.get("requestMetadata", {}).get("callerIp"),
+            "resource": proto.get("resourceName", "Unknown"),
+            "action": proto.get("methodName", "Unknown"),
             "status": status,
-            "raw_log": raw_log
+            "severity": severity,
+            "raw_log": raw_log,
         }

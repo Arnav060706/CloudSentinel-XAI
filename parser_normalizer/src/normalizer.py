@@ -10,3 +10,20 @@ def normalize_timestamp(ts_str: str) -> datetime:
         return dt.astimezone(timezone.utc)
     except Exception as e:
         raise ValueError(f"Invalid timestamp format: {ts_str}") from e
+
+def normalize_severity_from_score(score: float) -> str:
+    """Maps a numeric severity score to a standard label."""
+    # Ensure score is treated as a float
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        score = 0.0
+        
+    if score >= 4:
+        return "CRITICAL"
+    elif score >= 3:
+        return "HIGH"
+    elif score >= 2:
+        return "MEDIUM"
+    else:
+        return "LOW"

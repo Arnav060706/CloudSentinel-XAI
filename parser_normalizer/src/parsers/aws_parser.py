@@ -1,41 +1,38 @@
-#from src.parsers.base import BaseParser
-from src.normalizer import normalize_timestamp
-import json
+from src.normalizer import normalize_timestamp, normalize_severity_from_score
 
 class AWSCloudTrailParser:
     def parse(self, raw_log: dict) -> dict:
-        
-        # --- 1. Defensive User Identity Extraction ---
         user_identity = raw_log.get("userIdentity", {})
-        # Prioritize ARN, fallback to principalId, fallback to type
-        user_id = user_identity.get("arn", user_identity.get("principalId", user_identity.get("type", "Unknown")))
+        identity_type = user_identity.get("type", "Unknown")
 
-        # --- 2. Defensive Resource Extraction ---
-        resource = "None"
-        if raw_log.get("resources") and len(raw_log["resources"]) > 0:
-            resource = raw_log["resources"][0].get("ARN", "Unknown")
-        elif raw_log.get("requestParameters"):
-            # If no resources array, extract relevant data from request parameters
-            # e.g., AssumeRole has roleArn in requestParameters
-            req_params = raw_log["requestParameters"]
-            if isinstance(req_params, dict):
-                resource = req_params.get("roleArn", req_params.get("userName", "Multiple/Params"))
+        # Classification logic
+        if identity_type in {"IAMUser", "Root", "IdentityCenterUser", "FederatedUser", "SAMLUser"}:
+            account_type = "USER"
+        elif identity_type in {"AssumedRole", "Role", "AWSService"}:
+            account_type = "SERVICE"
+        else:
+            account_type = "UNKNOWN"
 
-        # --- 3. Severity & Status Derivation ---
-        # CloudTrail logs indicate failure via errorCode or errorMessage
+        user_id = user_identity.get("arn", user_identity.get("principalId", identity_type))
+        resource = raw_log.get("resources", [{}])[0].get("ARN", "None") if raw_log.get("resources") else "None"
+        
         is_error = bool(raw_log.get("errorCode") or raw_log.get("errorMessage"))
         status = "FAILED" if is_error else "SUCCESS"
 
-        # --- 4. Return matching the Unified Schema ---
+        score = raw_log.get("ml_labels", {}).get("severity_score")
+        severity = normalize_severity_from_score(score) if score is not None else ("HIGH" if is_error else "LOW")
+
         return {
             "timestamp": normalize_timestamp(raw_log.get("eventTime", "")),
             "source_cloud": "AWS",
             "event_type": raw_log.get("eventType", "Unknown"),
             "user_id": user_id,
             "source_ip": raw_log.get("sourceIPAddress"),
-            "destination_ip": None, # Native CT doesn't typically provide dest IP natively here
             "resource": resource,
-            "action": raw_log.get("eventName", "Unknown"),
+            "action": raw_log.get("eventName"),
             "status": status,
-            "raw_log": raw_log
+            "severity": severity,
+            "raw_log": raw_log,
+            "account_type": account_type,
+            "user_agent": raw_log.get("userAgent", "Unknown"),
         }

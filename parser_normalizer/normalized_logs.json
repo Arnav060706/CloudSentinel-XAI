@@ -1,0 +1,53 @@
+[
+    {
+        "timestamp": "2026-06-10 08:14:32+00:00",
+        "source_cloud": "AWS",
+        "event_type": "AwsConsoleSignIn",
+        "user_id": "arn:aws:iam::112233445566:user/alice.chen",
+        "source_ip": "203.0.113.45",
+        "destination_ip": null,
+        "resource": "None",
+        "action": "ConsoleLogin",
+        "status": "SUCCESS",
+        "severity": "LOW",
+        "mfa_authenticated": false,
+        "device_compliant_status": null,
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "geo_country": null,
+        "account_type": "USER"
+    },
+    {
+        "timestamp": "2026-06-10 08:20:14+00:00",
+        "source_cloud": "AZURE",
+        "event_type": "SignInLogs",
+        "user_id": "alice.chen@corp-example.com",
+        "source_ip": "203.0.113.10",
+        "destination_ip": null,
+        "resource": "Unknown",
+        "action": "Sign-in activity",
+        "status": "SUCCESS",
+        "severity": "LOW",
+        "mfa_authenticated": false,
+        "device_compliant_status": null,
+        "user_agent": null,
+        "geo_country": null,
+        "account_type": "UNKNOWN"
+    },
+    {
+        "timestamp": "2026-06-10 08:30:00+00:00",
+        "source_cloud": "GCP",
+        "event_type": "SetIamPolicy",
+        "user_id": "alice.chen@corp-example.com",
+        "source_ip": "203.0.113.45",
+        "destination_ip": null,
+        "resource": "projects/proj-alpha-112233",
+        "action": "SetIamPolicy",
+        "status": "SUCCESS",
+        "severity": "LOW",
+        "mfa_authenticated": false,
+        "device_compliant_status": null,
+        "user_agent": null,
+        "geo_country": null,
+        "account_type": "UNKNOWN"
+    }
+]
