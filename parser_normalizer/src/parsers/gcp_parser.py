@@ -6,10 +6,9 @@ class GCPCloudAuditParser:
         
         # Determine Status
         status = "SUCCESS"
-        # 1. Check for standard API errors
         if "status" in proto_payload and proto_payload["status"].get("code", 0) != 0:
             status = "FAILED"
-        # 2. Check for explicit Login failures
+            
         metadata = proto_payload.get("metadata", {})
         events = metadata.get("event", [])
         if events and isinstance(events, list):
@@ -30,16 +29,27 @@ class GCPCloudAuditParser:
         else:
             severity = "LOW"
 
+        # --- NEW: Phase 1 & 2 Telemetry Extraction ---
+        request_metadata = proto_payload.get("requestMetadata", {})
+        user_agent = request_metadata.get("callerSuppliedUserAgent", "Unknown")
+        mfa_authenticated = False
+        geo_country = "Unknown"
+        device_compliant_status = "Not Applicable"
+
         return {
             "timestamp": raw_log.get("timestamp"),
             "source_cloud": "GCP",
             "event_type": proto_payload.get("methodName", "Unknown"),
             "user_id": proto_payload.get("authenticationInfo", {}).get("principalEmail", "Unknown"),
-            "source_ip": proto_payload.get("requestMetadata", {}).get("callerIp"),
+            "source_ip": request_metadata.get("callerIp"),
             "destination_ip": None,
             "resource": proto_payload.get("resourceName", "Unknown"),
             "action": proto_payload.get("methodName", "Unknown"),
             "status": status,
             "severity": severity,
-            "raw_log": raw_log
+            "raw_log": raw_log,
+            "mfa_authenticated": mfa_authenticated,
+            "device_compliant_status": device_compliant_status,
+            "user_agent": user_agent,
+            "geo_country": geo_country
         }

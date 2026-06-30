@@ -1,16 +1,21 @@
 import logging
 from pydantic import ValidationError
+
 from src.schema import UnifiedLogModel
 from src.parsers.aws_parser import AWSCloudTrailParser
 from src.parsers.azure_parser import AzureActivityParser
 from src.parsers.gcp_parser import GCPCloudAuditParser
-from src.metrics import LOGS_RECEIVED, LOGS_NORMALIZED, LOGS_FAILED, PROCESS_TIME
+from src.metrics import (
+    LOGS_RECEIVED,
+    LOGS_NORMALIZED,
+    LOGS_FAILED,
+    PROCESS_TIME,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Cloud-specific signatures used for automatic source detection.
-# Created once when the module is imported.
 CLOUD_SIGNATURES = {
     "AWS": (
         "eventVersion",
@@ -21,7 +26,6 @@ CLOUD_SIGNATURES = {
     "AZURE": (
         "callerIpAddress",
         "category",
-        "correlationId",
         "tenantId",
     ),
     "GCP": (
@@ -40,12 +44,12 @@ class ParserPipeline:
             "AZURE": AzureActivityParser(),
             "GCP": GCPCloudAuditParser(),
         }
+
         self.failed_logs_store = []
 
     def _detect_cloud_source(self, raw_log: dict) -> str:
         """
-        Detect the originating cloud provider by matching provider-specific
-        signature keys against the incoming raw log.
+        Detect the cloud provider from provider-specific fields.
         """
 
         scores = {
@@ -55,15 +59,73 @@ class ParserPipeline:
 
         best_score = max(scores.values())
 
-        # No matching signature found
         if best_score == 0:
             return "UNKNOWN"
 
-        # Ambiguous match between multiple providers
         if list(scores.values()).count(best_score) > 1:
             return "UNKNOWN"
 
         return max(scores, key=scores.get)
+
+    def classify_account(self, source_cloud: str, raw_log: dict) -> str:
+        """
+        Determine whether the identity is a USER or SERVICE account
+        using the original cloud-native log.
+        """
+
+        try:
+            # ---------------- AWS ----------------
+            if source_cloud.upper() == "AWS":
+
+                identity_type = (
+                    raw_log.get("userIdentity", {})
+                    .get("type", "")
+                )
+
+                if identity_type == "IAMUser":
+                    return "USER"
+
+                if identity_type in {
+                    "AssumedRole",
+                    "Role",
+                    "AWSService",
+                    "FederatedUser",
+                }:
+                    return "SERVICE"
+
+            # ---------------- Azure ----------------
+            elif source_cloud.upper() == "AZURE":
+
+                props = raw_log.get("properties", {})
+
+                if props.get("servicePrincipalId"):
+                    return "SERVICE"
+
+                if props.get("managedIdentity"):
+                    return "SERVICE"
+
+                if props.get("userPrincipalName"):
+                    return "USER"
+
+            # ---------------- GCP ----------------
+            elif source_cloud.upper() == "GCP":
+
+                email = (
+                    raw_log.get("protoPayload", {})
+                    .get("authenticationInfo", {})
+                    .get("principalEmail", "")
+                )
+
+                if email.endswith("gserviceaccount.com"):
+                    return "SERVICE"
+
+                if email:
+                    return "USER"
+
+        except Exception as e:
+            logger.warning(f"Account classification failed: {e}")
+
+        return "UNKNOWN"
 
     @PROCESS_TIME.time()
     def process_log(
@@ -80,16 +142,28 @@ class ParserPipeline:
         parser = self.parsers.get(source_cloud.upper())
 
         if not parser:
-            error_msg = f"No parser configured or detected for cloud: {source_cloud}"
+            error_msg = f"No parser configured for cloud: {source_cloud}"
             logger.error(error_msg)
+
             self.failed_logs_store.append(
-                {"error": error_msg, "raw_log": raw_log}
+                {
+                    "error": error_msg,
+                    "raw_log": raw_log,
+                }
             )
+
             LOGS_FAILED.inc()
             return None
 
         try:
+
             parsed_dict = parser.parse(raw_log)
+
+            # Classify account directly from the original raw log
+            parsed_dict["account_type"] = self.classify_account(
+                source_cloud,
+                raw_log,
+            )
 
             validated_log = UnifiedLogModel(**parsed_dict)
 
@@ -98,17 +172,29 @@ class ParserPipeline:
             return validated_log
 
         except ValidationError as e:
-            logger.error(f"Validation failed for log: {e}")
+
+            logger.error(f"Validation failed: {e}")
+
             self.failed_logs_store.append(
-                {"error": str(e), "raw_log": raw_log}
+                {
+                    "error": str(e),
+                    "raw_log": raw_log,
+                }
             )
+
             LOGS_FAILED.inc()
             return None
 
         except Exception as e:
+
             logger.error(f"Processing error: {e}")
+
             self.failed_logs_store.append(
-                {"error": str(e), "raw_log": raw_log}
+                {
+                    "error": str(e),
+                    "raw_log": raw_log,
+                }
             )
+
             LOGS_FAILED.inc()
             return None

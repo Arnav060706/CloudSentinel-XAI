@@ -16,17 +16,14 @@ class AWSCloudTrailParser(BaseParser):
             resource = raw_log["resources"][0].get("ARN", "Unknown")
         elif raw_log.get("requestParameters"):
             # If no resources array, extract relevant data from request parameters
-            # e.g., AssumeRole has roleArn in requestParameters
             req_params = raw_log["requestParameters"]
             if isinstance(req_params, dict):
                 resource = req_params.get("roleArn", req_params.get("userName", "Multiple/Params"))
 
         # --- 3. Severity & Status Derivation ---
-        # CloudTrail logs indicate failure via errorCode or errorMessage
         is_error = bool(raw_log.get("errorCode") or raw_log.get("errorMessage"))
         status = "FAILED" if is_error else "SUCCESS"
         
-        # Use ML labels if available, otherwise infer from status
         ml_labels = raw_log.get("ml_labels", {})
         severity_score = ml_labels.get("severity_score", None)
         
@@ -35,17 +32,30 @@ class AWSCloudTrailParser(BaseParser):
         else:
             severity = "HIGH" if is_error else "LOW"
 
-        # --- 4. Return matching the Unified Schema ---
+        # --- 4. NEW: Phase 1 & 2 Telemetry Extraction ---
+        # Parse MFA explicitly as a boolean
+        mfa_str = str(user_identity.get("sessionContext", {}).get("attributes", {}).get("mfaAuthenticated")).lower()
+        mfa_authenticated = (mfa_str == "true")
+        
+        user_agent = raw_log.get("userAgent", "Unknown")
+        geo_country = "Unknown"
+        device_compliant_status = "Not Applicable"
+
+        # --- 5. Return matching the Unified Schema ---
         return {
             "timestamp": normalize_timestamp(raw_log.get("eventTime", "")),
             "source_cloud": "AWS",
             "event_type": raw_log.get("eventType", "Unknown"),
             "user_id": user_id,
             "source_ip": raw_log.get("sourceIPAddress"),
-            "destination_ip": None, # Native CT doesn't typically provide dest IP natively here
+            "destination_ip": None,
             "resource": resource,
             "action": raw_log.get("eventName", "Unknown"),
             "status": status,
             "severity": severity,
-            "raw_log": raw_log
+            "raw_log": raw_log,
+            "mfa_authenticated": mfa_authenticated,
+            "device_compliant_status": device_compliant_status,
+            "user_agent": user_agent,
+            "geo_country": geo_country
         }
