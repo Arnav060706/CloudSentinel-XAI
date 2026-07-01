@@ -1,6 +1,6 @@
 # app/routers/ingest.py
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status
-from app.schemas.telemetry import NormalizedLogSchema
+from app.parser_normalizer.src.schema import UnifiedLogModel
 from typing import List
 import app.main as main_core
 
@@ -8,7 +8,7 @@ router = APIRouter(tags=["Telemetry Ingestion Pipeline"])
 
 @router.post("/ingest", status_code=status.HTTP_202_ACCEPTED)
 async def ingest_multi_cloud_stream(
-    payload: List[NormalizedLogSchema], 
+    payload: List[UnifiedLogModel], 
     background_tasks: BackgroundTasks
 ):
     """

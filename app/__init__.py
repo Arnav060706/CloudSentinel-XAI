@@ -1,0 +1,1 @@
+__project_name__ = "CloudSentinel-XAI"
