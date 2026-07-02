@@ -28,7 +28,7 @@ from app.services.ml_inference import ParallelMLEngine
 from app.services.db_flusher import pending_risk_updates
 
 from app.services.xai_engine import FaithfulnessGatedXAI
-from app.schemas.models import XAIAlert
+from app.core.database import XAIAlert
 from sqlalchemy.dialects.sqlite import insert
 from app.core.database import AsyncSessionLocal
 
@@ -98,7 +98,7 @@ async def process_log_through_engine(log_data: dict):
         # ------------------------------------------------------------------ #
         # The graph engine maps correlates, and resolves aliases across cloud 
         # fabrics, returning the unified canonical entity identifier.
-        entity_id, active_events = graph.process_event(scored_log)
+        entity_id, active_events, is_new = graph.process_event(scored_log)
         
         if not active_events:
             logger.debug(f"Event window empty or expired for entity: {entity_id}")
