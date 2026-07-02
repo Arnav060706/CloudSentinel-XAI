@@ -1,0 +1,138 @@
+# app/services/xai_engine.py
+import asyncio
+import logging
+import pandas as pd
+from typing import Dict, Any, Tuple
+from ollama import AsyncClient, ResponseError
+
+logger = logging.getLogger(__name__)
+
+class FaithfulnessGatedXAI:
+    def __init__(self, state_matrix: dict, ollama_host: str = 'http://localhost:11434'):
+        """
+        Initializes the XAI engine, extracting the XGBoost model to perform
+        the mathematical deletion test (Faithfulness Gate) prior to LLM execution.
+        """
+        self.xgboost_model = state_matrix.get("xgboost")
+        self.feature_encoder = state_matrix.get("feature_encoder")
+        
+        # Utilize the non-blocking AsyncClient to protect the FastAPI event loop
+        self.llm_client = AsyncClient(host=ollama_host)
+        
+        # Delta threshold: Confidence must drop by at least 15% when top features 
+        # are removed for the explanation to be considered mathematically "faithful".
+        self.faithfulness_delta = 0.15 
+
+    async def generate_forensic_narrative(self, log_data: dict, risk_state: dict) -> Tuple[bool, str]:
+        """
+        Main Layer 5 Entrypoint.
+        Executes the Faithfulness Gate. If passed, queries Llama 3.2 asynchronously.
+        Returns: (Passed_Gate_Bool, Narrative_String)
+        """
+        shap_attributions = log_data.get("shap_attributions", {})
+        original_confidence = log_data.get("phase_confidence", 0.0)
+        predicted_phase = log_data.get("predicted_phase", "Unknown")
+        
+        # 1. Execute the Faithfulness Deletion Gate (CPU-Bound, sent to thread)
+        is_faithful = await asyncio.to_thread(
+            self._run_deletion_test, 
+            log_data, 
+            shap_attributions, 
+            original_confidence
+        )
+        
+        if not is_faithful:
+            logger.warning(f"XAI Faithfulness Gate FAILED for entity: {log_data.get('principal')}")
+            return False, "Low-confidence attribution: SHAP deletion test failed. Flagged for manual analyst review."
+
+        # 2. Gate Passed: Construct the rigorous prompting context
+        system_instruction = (
+            "You are an expert cloud security AI agent embedded within a Tier-3 SOC. "
+            "Your task is to translate complex multi-cloud risk telemetry and validated "
+            "mathematical SHAP attributions into an actionable triage narrative. "
+            "Limit your response to exactly two sentences. Do not hallucinate external context."
+        )
+        
+        # Incorporate the Hawkes dominant signal directly to guide the LLM's reasoning
+        user_prompt = f"""
+        [CRITICAL MULTI-CLOUD SECURITY ALERT]
+        Target Entity: {log_data.get('principal')}
+        Cloud Provider: {log_data.get('source_cloud')}
+        Detected Attack Phase: {predicted_phase} (Confidence: {original_confidence * 100:.1f}%)
+        
+        Hawkes Risk Engine Dominant Signal: {risk_state.get('dominant_signal', 'Unknown')}
+        Cross-Cloud Span: {risk_state.get('cloud_span_count', 1)} providers
+        
+        Validated SHAP Feature Drivers:
+        {shap_attributions}
+        
+        Provide a 2-sentence tactical breakdown explaining what happened and why the AI flagged it based strictly on these features.
+        """
+
+        # 3. Asynchronous LLM Execution
+        try:
+            response = await self.llm_client.chat(
+                model='llama3.2',
+                messages=[
+                    {'role': 'system', 'content': system_instruction},
+                    {'role': 'user', 'content': user_prompt}
+                ],
+                options={
+                    'temperature': 0.1,  # Ultra-low temp for deterministic reporting
+                    'num_predict': 150
+                }
+            )
+            narrative = response['message']['content'].strip()
+            return True, narrative
+            
+        except ResponseError as e:
+            logger.error(f"Ollama Inference Error: {e}")
+            return True, "Automated narrative generation failed due to inference timeout."
+        except Exception as e:
+            logger.error(f"Unexpected XAI exception: {e}")
+            return True, "Automated narrative generation encountered an unexpected error."
+
+    def _run_deletion_test(self, log_data: dict, shap_attributions: dict, original_confidence: float) -> bool:
+        """
+        The Mathematical Faithfulness Gate (Patent/Paper Claim).
+        Zeroes out the top SHAP features, re-encodes, and re-runs XGBoost.
+        If the prediction confidence does not drop by the delta threshold, the
+        attribution is spurious/unfaithful.
+        """
+        if not self.xgboost_model or not shap_attributions:
+            return False
+            
+        # Create a deep copy of the original feature state to perturb
+        perturbed_features = {k: v for k, v in log_data.items() if k not in ["anomaly_score", "predicted_phase", "phase_confidence", "shap_attributions"]}
+        
+        # "Delete" the top SHAP features by setting them to a baseline/unknown state
+        for feature_name in shap_attributions.keys():
+            if feature_name in perturbed_features:
+                if isinstance(perturbed_features[feature_name], str):
+                    perturbed_features[feature_name] = "Unknown"
+                else:
+                    perturbed_features[feature_name] = 0
+
+        # Re-encode the perturbed vector
+        df = pd.DataFrame([perturbed_features])
+        if self.feature_encoder:
+            try:
+                x_tensor = self.feature_encoder.transform(df)
+            except Exception:
+                return False
+        else:
+            for col in df.columns:
+                if df[col].dtype == 'object' or df[col].dtype == 'bool':
+                    df[col] = df[col].astype('category')
+            x_tensor = df
+            
+        # Re-run XGBoost inference
+        probabilities = self.xgboost_model.predict_proba(x_tensor)[0]
+        # Calculate confidence drop on the original predicted class index
+        # (Assuming argmax index logic is mirrored from ml_inference)
+        new_confidence = max(probabilities) 
+        
+        confidence_drop = original_confidence - new_confidence
+        
+        # If the drop is greater than our threshold, the features were truly load-bearing
+        return confidence_drop >= self.faithfulness_delta
