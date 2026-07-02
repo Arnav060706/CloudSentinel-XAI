@@ -1,4 +1,3 @@
-# app/services/ml_inference.py
 """
 ParallelMLEngine — Asynchronous Multi-Model Inference & XAI Extraction
 ======================================================================
@@ -95,6 +94,7 @@ class ParallelMLEngine:
             # Failsafe: if models aren't loaded, return standard weights
             normalized_event["anomaly_score"] = 0.1
             normalized_event["phase_confidence"] = 0.1
+            normalized_event["predicted_phase_index"] = 0  # NEW: Safe default for downstream XAI
             return normalized_event
 
         # 1. Prepare and encode the feature matrix (X)
@@ -103,6 +103,7 @@ class ParallelMLEngine:
         except Exception as e:
             logger.error(f"Feature encoding failure: {e}")
             normalized_event["anomaly_score"] = 0.1
+            normalized_event["predicted_phase_index"] = 0  # NEW: Safe default for downstream XAI
             return normalized_event
 
         # 2. Execute CPU-bound models in isolated background threads concurrently
@@ -115,6 +116,8 @@ class ParallelMLEngine:
         normalized_event["anomaly_score"] = iso_result
         
         normalized_event["predicted_phase"] = xgb_result.get("predicted_phase", "Normal")
+        # NEW: Attach the raw index to bridge the gap with the XAI Faithfulness gate
+        normalized_event["predicted_phase_index"] = xgb_result.get("predicted_phase_index", 0)
         normalized_event["phase_confidence"] = xgb_result.get("confidence", 0.0)
         
         # Pass SHAP attributions down the pipeline for the LLM XAI Gate
@@ -141,9 +144,12 @@ class ParallelMLEngine:
         else:
             # Fallback for development if encoder isn't provided:
             # XGBoost can handle 'category' dtypes if configured natively
-            for col in df.columns:
-                if df[col].dtype == 'object' or df[col].dtype == 'bool':
-                    df[col] = df[col].astype('category')
+            
+            # OPTIMIZATION: Replaced the slow standard Python for-loop with Pandas Vectorization
+            obj_cols = df.select_dtypes(include=['object', 'bool']).columns
+            if not obj_cols.empty:
+                df[obj_cols] = df[obj_cols].astype('category')
+                
             encoded_tensor = df
 
         return encoded_tensor, df
@@ -167,7 +173,8 @@ class ParallelMLEngine:
         """
         # 1. Predict Class and Probability
         probabilities = self.xgboost_model.predict_proba(x_tensor)[0]
-        predicted_index = np.argmax(probabilities)
+        # FIXED: Explicitly cast np.int64 to a standard Python int to prevent JSON serialization errors downstream
+        predicted_index = int(np.argmax(probabilities))
         confidence = probabilities[predicted_index]
         
         # Map numeric class back to string (Assuming classes were mapped via encoder)
@@ -204,6 +211,7 @@ class ParallelMLEngine:
 
         return {
             "predicted_phase": str(predicted_phase),
+            "predicted_phase_index": predicted_index,  # NEW: Packaged for the XAI Engine Faithfulness verification
             "confidence": round(float(confidence), 4),
             "shap_attributions": top_shap_features
         }
