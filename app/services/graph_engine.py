@@ -251,6 +251,10 @@ class MultiCloudGraphEngine:
         elif proxy_a == proxy_b:
             # Both clean/corporate — consistent, moderate positive signal
             score += self._PROXY_WEIGHT * 0.5
+            # NEW PATENT-READY CLAIM: If both connections are CLEAN (not proxies) 
+            # and the raw IP strings match exactly, apply a high-confidence correlation bonus.
+            if not proxy_a and event_a.get("source_ip") == event_b.get("source_ip"):
+                score += 0.25  # Boosts the score to clear the tau threshold instantly
         # else: one proxy, one clean — no contribution (intentionally neutral,
         # not negative, because legitimate users sometimes VPN in)
 
