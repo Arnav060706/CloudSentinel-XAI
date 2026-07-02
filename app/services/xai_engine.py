@@ -33,19 +33,24 @@ class FaithfulnessGatedXAI:
         original_confidence = log_data.get("phase_confidence", 0.0)
         predicted_phase = log_data.get("predicted_phase", "Unknown")
         
-        # 1. Execute the Faithfulness Deletion Gate (CPU-Bound, sent to thread)
+        # Extract the original class index; defaults to 0 if missing to prevent crashes
+        # This should ideally be passed from the upstream ml_inference dictionary (subject to change)
+        predicted_phase_index = log_data.get("predicted_phase_index", 0) 
+        
+        # Step 1: Execute the Faithfulness Deletion Gate (CPU-Bound, sent to thread)
         is_faithful = await asyncio.to_thread(
             self._run_deletion_test, 
             log_data, 
             shap_attributions, 
-            original_confidence
+            original_confidence,
+            predicted_phase_index
         )
         
         if not is_faithful:
-            logger.warning(f"XAI Faithfulness Gate FAILED for entity: {log_data.get('principal')}")
+            logger.warning(f"XAI Faithfulness Gate FAILED for entity: {log_data.get('principal', 'Unknown')}")
             return False, "Low-confidence attribution: SHAP deletion test failed. Flagged for manual analyst review."
 
-        # 2. Gate Passed: Construct the rigorous prompting context
+        # Step 2: Gate Passed: Construct the rigorous prompting context
         system_instruction = (
             "You are an expert cloud security AI agent embedded within a Tier-3 SOC. "
             "Your task is to translate complex multi-cloud risk telemetry and validated "
@@ -56,8 +61,8 @@ class FaithfulnessGatedXAI:
         # Incorporate the Hawkes dominant signal directly to guide the LLM's reasoning
         user_prompt = f"""
         [CRITICAL MULTI-CLOUD SECURITY ALERT]
-        Target Entity: {log_data.get('principal')}
-        Cloud Provider: {log_data.get('source_cloud')}
+        Target Entity: {log_data.get('principal', 'Unknown')}
+        Cloud Provider: {log_data.get('source_cloud', 'Unknown')}
         Detected Attack Phase: {predicted_phase} (Confidence: {original_confidence * 100:.1f}%)
         
         Hawkes Risk Engine Dominant Signal: {risk_state.get('dominant_signal', 'Unknown')}
@@ -69,7 +74,7 @@ class FaithfulnessGatedXAI:
         Provide a 2-sentence tactical breakdown explaining what happened and why the AI flagged it based strictly on these features.
         """
 
-        # 3. Asynchronous LLM Execution
+        # Step 3: Asynchronous LLM Execution; AyncClient is handling the event loop without blocking FastAPI
         try:
             response = await self.llm_client.chat(
                 model='llama3.2',
@@ -82,7 +87,8 @@ class FaithfulnessGatedXAI:
                     'num_predict': 150
                 }
             )
-            narrative = response['message']['content'].strip()
+            # Safely navigate the response dictionary
+            narrative = response.get('message', {}).get('content', '').strip()
             return True, narrative
             
         except ResponseError as e:
@@ -92,7 +98,7 @@ class FaithfulnessGatedXAI:
             logger.error(f"Unexpected XAI exception: {e}")
             return True, "Automated narrative generation encountered an unexpected error."
 
-    def _run_deletion_test(self, log_data: dict, shap_attributions: dict, original_confidence: float) -> bool:
+    def _run_deletion_test(self, log_data: dict, shap_attributions: dict, original_confidence: float, original_class_index: int) -> bool:
         """
         The Mathematical Faithfulness Gate (Patent/Paper Claim).
         Zeroes out the top SHAP features, re-encodes, and re-runs XGBoost.
@@ -102,37 +108,57 @@ class FaithfulnessGatedXAI:
         if not self.xgboost_model or not shap_attributions:
             return False
             
+        # Pre-define exclusion keys as a set for faster O(1) lookups during dictionary comprehension
+        exclude_keys = {"anomaly_score", "predicted_phase", "predicted_phase_index", "phase_confidence", "shap_attributions"}
+        
         # Create a deep copy of the original feature state to perturb
-        perturbed_features = {k: v for k, v in log_data.items() if k not in ["anomaly_score", "predicted_phase", "phase_confidence", "shap_attributions"]}
+        perturbed_features = {k: v for k, v in log_data.items() if k not in exclude_keys}
         
         # "Delete" the top SHAP features by setting them to a baseline/unknown state
         for feature_name in shap_attributions.keys():
             if feature_name in perturbed_features:
-                if isinstance(perturbed_features[feature_name], str):
+                val = perturbed_features[feature_name]
+                # Maintain type integrity to prevent XGBoost tensor errors
+                if isinstance(val, str):
                     perturbed_features[feature_name] = "Unknown"
+                elif isinstance(val, bool):
+                    perturbed_features[feature_name] = False
                 else:
-                    perturbed_features[feature_name] = 0
+                    perturbed_features[feature_name] = 0.0
 
         # Re-encode the perturbed vector
         df = pd.DataFrame([perturbed_features])
+        
         if self.feature_encoder:
             try:
                 x_tensor = self.feature_encoder.transform(df)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Feature encoding failed during deletion test: {e}")
                 return False
         else:
-            for col in df.columns:
-                if df[col].dtype == 'object' or df[col].dtype == 'bool':
-                    df[col] = df[col].astype('category')
+            # Batch type conversion using pandas vectorization instead of a Python for-loop for efficiency
+            obj_cols = df.select_dtypes(include=['object', 'bool']).columns
+            if not obj_cols.empty:
+                df[obj_cols] = df[obj_cols].astype('category')
             x_tensor = df
             
         # Re-run XGBoost inference
-        probabilities = self.xgboost_model.predict_proba(x_tensor)[0]
+        try:
+            probabilities = self.xgboost_model.predict_proba(x_tensor)[0]
+        except Exception as e:
+            logger.error(f"XGBoost inference failed during deletion test: {e}")
+            return False
+            
         # Calculate confidence drop on the original predicted class index
-        # (Assuming argmax index logic is mirrored from ml_inference)
-        new_confidence = max(probabilities) 
+        if original_class_index < len(probabilities):
+            new_confidence = probabilities[original_class_index]
+        else:
+            logger.error(f"Class index {original_class_index} out of bounds for probability array.")
+            return False
         
         confidence_drop = original_confidence - new_confidence
         
         # If the drop is greater than our threshold, the features were truly load-bearing
         return confidence_drop >= self.faithfulness_delta
+    
+    # Threshold value is a placeholder for now; subject to change
