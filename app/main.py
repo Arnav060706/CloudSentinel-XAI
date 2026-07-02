@@ -12,6 +12,9 @@ from app.routers import ingest
 # @asynccontextmanager
 # async def lifespan(app: FastAPI):
 #     # --- STARTUP TIMELINE ---
+#     # 1. Initialize SQLite Database Tables via SQLAlchemy
+#        async with engine.begin() as conn:
+#            await conn.run_sync(Base.metadata.create_all)
 #     # Load resource-intensive binary models directly into memory once
 #     with open("models/isolation_forest.pkl", "rb") as f:
 #         state_matrix["iso_forest"] = pickle.load(f)
@@ -22,9 +25,19 @@ from app.routers import ingest
     
 #     # Instantiate our stateful O(1) in-memory directed graph engine
 #     state_matrix["graph_engine"] = MultiCloudGraphEngine()
+
+#     # 3. Spin up the Background Flush Ticker
+#     flush_task = asyncio.create_task(risk_flush_ticker(flush_interval_seconds=3))
+#     background_tasks_refs["flush_ticker"] = flush_task
     
 #     yield
 #     # --- SHUTDOWN TIMELINE ---
+      # 1. Cancel the flush ticker gracefully
+#      if "flush_ticker" in background_tasks_refs:
+#        background_tasks_refs["flush_ticker"].cancel()
+        
+      # 2. Close database connections
+#      await engine.dispose()
 #     state_matrix.clear()
 
 app = FastAPI(

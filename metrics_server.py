@@ -2,7 +2,7 @@ import time
 import random
 import requests
 from prometheus_client import start_http_server, Gauge, Counter
-from aggregator.xai_triage import generate_soc_narrative
+from app.services.xai_triage import generate_soc_narrative
 
 # 1. Stateful Trust Layer Metric (Layer 4)
 USER_TRUST_GAUGE = Gauge(
