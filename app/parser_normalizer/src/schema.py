@@ -27,3 +27,11 @@ class UnifiedLogModel(BaseModel):
     geo_country: Optional[str] = None
 
     account_type: str = "UNKNOWN"  # "USER" or "SERVICE"
+
+    # --- ENRICHMENT FIELDS (real IP reputation + real behavioral tracking,
+    principal_type: str = "Unknown"  # e.g. IAMUser, AssumedRole, ServicePrincipal, ServiceAccount
+    principal_created_in_window: bool = False
+    is_known_proxy_or_tor: Optional[Any] = None  # True / False / "Unknown" (no reference data loaded)
+    ua_family: Optional[str] = None
+    ua_version: Optional[str] = None
+

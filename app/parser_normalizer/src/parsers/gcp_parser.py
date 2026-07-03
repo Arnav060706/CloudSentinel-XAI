@@ -25,4 +25,5 @@ class GCPCloudAuditParser:
             "status": status,
             "severity": severity,
             "raw_log": raw_log,
+            "user_agent": proto.get("requestMetadata", {}).get("callerSuppliedUserAgent", "Unknown"),
         }

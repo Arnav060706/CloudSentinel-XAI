@@ -1,10 +1,19 @@
 import logging
+import os
 from pydantic import ValidationError
 from src.schema import UnifiedLogModel
 from src.parsers.aws_parser import AWSCloudTrailParser
 from src.parsers.azure_parser import AzureActivityParser
 from src.parsers.gcp_parser import GCPCloudAuditParser
 from src.metrics import LOGS_RECEIVED, LOGS_NORMALIZED, LOGS_FAILED, PROCESS_TIME
+from src import enrichment
+
+# Optional reference data for IP reputation / geo lookups. Missing files are
+# handled gracefully (fields fall back to "Unknown") - see enrichment.py.
+REFERENCE_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reference_data")
+TOR_LIST_PATH = os.path.join(REFERENCE_DATA_DIR, "tor_exit_nodes.txt")
+GEO_COUNTRY_DB_PATH = os.path.join(REFERENCE_DATA_DIR, "GeoLite2-Country.mmdb")
+GEO_ASN_DB_PATH = os.path.join(REFERENCE_DATA_DIR, "GeoLite2-ASN.mmdb")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,6 +50,12 @@ class ParserPipeline:
             "GCP": GCPCloudAuditParser(),
         }
         self.failed_logs_store = []
+
+        # Enrichment state: loaded once, reused across every event.
+        self.tor_set = enrichment.load_tor_exit_list(TOR_LIST_PATH)
+        self.country_db = enrichment.load_geo_db(GEO_COUNTRY_DB_PATH)
+        self.asn_db = enrichment.load_geo_db(GEO_ASN_DB_PATH)
+        self.principal_tracker = enrichment.PrincipalWindowTracker()
 
     def _detect_cloud_source(self, raw_log: dict) -> str:
         """
@@ -86,6 +101,19 @@ class ParserPipeline:
 
         try:
             parsed_dict = parser.parse(raw_log)
+
+            # --- Enrichment (real IP reputation + real principal-creation
+            #     tracking, ported from 06_normalize_features.py) ---
+            cloud_key = source_cloud.lower()
+            identity = enrichment._get_identity(cloud_key, raw_log)
+            parsed_dict["principal_type"] = enrichment.principal_type_from_identity(cloud_key, identity)
+            parsed_dict["principal_created_in_window"] = self.principal_tracker.observe_and_check(cloud_key, raw_log)
+            parsed_dict["is_known_proxy_or_tor"] = enrichment.ip_reputation(
+                parsed_dict.get("source_ip"), self.tor_set, self.asn_db
+            )
+            parsed_dict["geo_country"] = enrichment.geo_country(parsed_dict.get("source_ip"), self.country_db)
+            ua_family, ua_version = enrichment.parse_user_agent(parsed_dict.get("user_agent"))
+            parsed_dict["ua_family"], parsed_dict["ua_version"] = ua_family, ua_version
 
             validated_log = UnifiedLogModel(**parsed_dict)
 

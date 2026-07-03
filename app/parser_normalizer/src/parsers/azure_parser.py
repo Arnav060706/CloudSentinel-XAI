@@ -30,4 +30,5 @@ class AzureActivityParser:
             "status": status,
             "severity": severity,
             "raw_log": raw_log,
+            "user_agent": properties.get("userAgent", "Unknown"),
         }
