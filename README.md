@@ -1,8 +1,8 @@
 <a name="top"></a>
 
-<h1 align="center">CloudSentinel-XAI</h1>
+<h1>CloudSentinel-XAI</h1>
 
-<p align="center">
+<p>
   AI-Driven Zero-Trust Security Framework for Explainable Threat Detection in Multi-Cloud Environments
 </p>
 
