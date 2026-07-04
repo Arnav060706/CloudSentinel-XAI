@@ -19,6 +19,20 @@ class AzureActivityParser:
         # Assuming score is 0-5 scale; adjust if your model outputs 0-1
         severity = normalize_severity_from_score(score)
 
+        # These two were previously discarded even though Azure Sign-in logs
+        # carry them natively (properties.mfaDetail, properties.deviceDetail).
+        # Losing them made mfa_authenticated/device_compliant_status constant
+        # for every Azure event, i.e. zero-signal features for the ML models.
+        mfa_authenticated = bool(properties.get("mfaDetail"))
+        device_detail = properties.get("deviceDetail", {}) or {}
+        is_compliant = device_detail.get("isCompliant")
+        if is_compliant is True:
+            device_compliant_status = "Compliant"
+        elif is_compliant is False:
+            device_compliant_status = "NonCompliant"
+        else:
+            device_compliant_status = "Unknown"
+
         return {
             "timestamp": normalize_timestamp(raw_log.get("time", "")),
             "source_cloud": "AZURE",
@@ -31,4 +45,6 @@ class AzureActivityParser:
             "severity": severity,
             "raw_log": raw_log,
             "user_agent": properties.get("userAgent", "Unknown"),
+            "mfa_authenticated": mfa_authenticated,
+            "device_compliant_status": device_compliant_status,
         }

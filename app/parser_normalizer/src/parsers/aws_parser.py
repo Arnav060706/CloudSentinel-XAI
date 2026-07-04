@@ -22,6 +22,12 @@ class AWSCloudTrailParser:
         score = raw_log.get("ml_labels", {}).get("severity_score")
         severity = normalize_severity_from_score(score) if score is not None else ("HIGH" if is_error else "LOW")
 
+        # MFA signal was previously discarded even though CloudTrail carries
+        # it on console logins (additionalEventData.MFAUsed). Losing this
+        # made mfa_authenticated a constant False for every AWS event.
+        additional_event_data = raw_log.get("additionalEventData", {}) or {}
+        mfa_authenticated = str(additional_event_data.get("MFAUsed", "")).lower() == "yes"
+
         return {
             "timestamp": normalize_timestamp(raw_log.get("eventTime", "")),
             "source_cloud": "AWS",
@@ -35,4 +41,5 @@ class AWSCloudTrailParser:
             "raw_log": raw_log,
             "account_type": account_type,
             "user_agent": raw_log.get("userAgent", "Unknown"),
+            "mfa_authenticated": mfa_authenticated,
         }

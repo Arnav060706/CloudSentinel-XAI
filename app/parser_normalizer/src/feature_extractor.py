@@ -9,7 +9,14 @@ logger = logging.getLogger(__name__)
 
 class MLFeatureExtractor:
     def __init__(self):
-        # Encoders for ALL categorical variables (Phase 1 & 2)
+        # Encoders for ALL categorical variables (Phase 1, 2 & 3)
+        # NOTE: account_type, principal_type, is_known_proxy_or_tor, ua_family,
+        # and ua_version were previously missing here entirely. They are the
+        # exact "Identity Context" / "Network Context" features the
+        # architecture routes into XGBoost + Isolation Forest, but because
+        # they were never encoded they were left as raw strings in X, which
+        # crashes both sklearn models at .fit()/.predict() time
+        # (e.g. "could not convert string to float: 'USER'").
         self.label_encoders = {
             'source_cloud': LabelEncoder(),
             'action': LabelEncoder(),
@@ -17,7 +24,12 @@ class MLFeatureExtractor:
             'device_compliant_status': LabelEncoder(),
             'browser_type': LabelEncoder(),
             'os_type': LabelEncoder(),
-            'geo_country': LabelEncoder()
+            'geo_country': LabelEncoder(),
+            'account_type': LabelEncoder(),
+            'principal_type': LabelEncoder(),
+            'is_known_proxy_or_tor': LabelEncoder(),
+            'ua_family': LabelEncoder(),
+            'ua_version': LabelEncoder(),
         }
         
         # Phase 1: Action Sensitivity Mapping (Basic Baseline)
@@ -73,6 +85,21 @@ class MLFeatureExtractor:
             lambda x: 1 if any(kw in x.lower() for kw in ['svc', 'role', 'arn:', 'service']) else 0
         )
 
+        # Phase 3 Identity/Network Context (previously computed by the parser/
+        # enrichment stage but never carried through to X). Cast/backfill
+        # them the same way the other raw-string and tri-state fields above
+        # are handled, so they can go through label encoding below instead
+        # of being silently dropped or left as raw strings.
+        df['account_type'] = df.get('account_type', 'UNKNOWN').fillna('UNKNOWN').astype(str)
+        df['principal_type'] = df.get('principal_type', 'Unknown').fillna('Unknown').astype(str)
+        # is_known_proxy_or_tor is a tri-state (True / False / "Unknown");
+        # stringify uniformly before encoding so LabelEncoder doesn't choke
+        # on mixed bool/str types.
+        df['is_known_proxy_or_tor'] = df.get('is_known_proxy_or_tor', 'Unknown').fillna('Unknown').astype(str)
+        df['principal_created_in_window'] = df.get('principal_created_in_window', False).fillna(False).astype(int)
+        df['ua_family'] = df.get('ua_family', 'Unknown').fillna('Unknown').astype(str)
+        df['ua_version'] = df.get('ua_version', 'Unknown').fillna('Unknown').astype(str)
+
         # Network & Endpoint (Browser/OS Parsed from user_agent)
         df['device_compliant_status'] = df.get('device_compliant_status', 'Unknown').fillna('Unknown')
         df['user_agent'] = df.get('user_agent', 'Unknown').fillna('Unknown')
@@ -113,14 +140,34 @@ class MLFeatureExtractor:
         df['ip_num'] = pd.factorize(df.get('source_ip', '0.0.0.0'))[0]
         df['resource_num'] = pd.factorize(df.get('resource', 'Unknown'))[0]
 
-        # Velocity Metrics: Counts and Error Rates (Simplified for demo dataset)
-        df['api_call_count_1m'] = df.groupby('user_id')['user_id'].transform("count").fillna(1)
+        # Velocity Metrics: Counts and Error Rates
+        # PREVIOUSLY: these used groupby(...).transform("count") / .cumsum(),
+        # which is an ALL-TIME count per user across the whole batch, not an
+        # actual rolling time window. On this 3-row demo file that's
+        # invisible, but on real multi-day production data "api_call_count_1m"
+        # would silently report a user's total lifetime call count instead of
+        # their calls in the trailing minute — making the velocity signal
+        # meaningless for burst/brute-force detection. Fixed to use genuine
+        # time-based rolling windows, keeping column names/order unchanged.
+        df = df.set_index('timestamp', drop=False)
+        df['_one'] = 1  # helper column for rolling counts; dropped before export
 
-        df['failed_actions_5m'] = df.groupby('user_id')['login_result_success'].transform(
-            lambda x: (x == 0).cumsum()
+        df['api_call_count_1m'] = (
+            df.groupby('user_id', group_keys=False)['_one']
+              .apply(lambda x: x.rolling('1min').count())
+              .fillna(1)
         )
-        df['total_actions_5m'] = df.groupby('user_id')['login_result_success'].transform("count")
+
+        df['failed_actions_5m'] = (
+            df.groupby('user_id', group_keys=False)['login_result_success']
+              .apply(lambda x: (x == 0).rolling('5min').sum())
+        )
+        df['total_actions_5m'] = (
+            df.groupby('user_id', group_keys=False)['login_result_success']
+              .apply(lambda x: x.rolling('5min').count())
+        )
         df['error_rate_5m'] = (df['failed_actions_5m'] / df['total_actions_5m']).fillna(0.0)
+        df = df.reset_index(drop=True)
 
         # Read vs Write Ratio (Reconnaissance detection)
         df['is_read_action'] = df['action'].astype(str).str.contains('Get|List|Describe|Read', case=False).astype(int)
@@ -137,18 +184,24 @@ class MLFeatureExtractor:
             .fillna(1)
         )
 
+        # PREVIOUSLY: "_last_24h" implied a rolling 24h window but was
+        # actually an all-time nunique()/cumsum() over the whole batch —
+        # same all-time-vs-windowed bug as the velocity metrics above.
+        # Fixed to use a genuine trailing-24h time window.
+        df = df.set_index('timestamp', drop=False)
         df["unique_ips_last_24h"] = (
-            df.groupby("user_id")["ip_num"]
-            .transform("nunique")
-            .fillna(1)
+            df.groupby("user_id", group_keys=False)["ip_num"]
+              .apply(lambda x: x.rolling('24h').apply(lambda w: pd.Series(w).nunique(), raw=True))
+              .fillna(1)
         )
-        
+
         # High-sensitivity actions in the last 24h
         df['is_privileged'] = df['action_sensitivity_score'].apply(lambda x: 1 if x >= 3 else 0)
         df["privileged_actions_last_24h"] = (
-            df.groupby("user_id")["is_privileged"]
-            .cumsum()
+            df.groupby("user_id", group_keys=False)["is_privileged"]
+              .apply(lambda x: x.rolling('24h').sum())
         )
+        df = df.reset_index(drop=True)
 
         # Reset index back to normal integers
         df = df.reset_index(drop=True)
@@ -161,7 +214,7 @@ class MLFeatureExtractor:
         columns_to_drop = [
             'source_ip', 'destination_ip', 'resource', 'event_type', 'status', 'user_agent',
             'failed_actions_5m', 'total_actions_5m', 'ip_num', 'resource_num', 
-            'is_read_action', 'is_write_action', 'is_privileged'
+            'is_read_action', 'is_write_action', 'is_privileged', '_one'
         ]
         df = df.drop(columns=[col for col in columns_to_drop if col in df.columns])
 
@@ -177,7 +230,11 @@ class MLFeatureExtractor:
         X = df.drop(columns=y_cols)
 
         # 3. Label Encode ALL categorical strings in X
-        categorical_cols = ['source_cloud', 'action', 'user_id', 'device_compliant_status', 'browser_type', 'os_type', 'geo_country']
+        categorical_cols = [
+            'source_cloud', 'action', 'user_id', 'device_compliant_status', 'browser_type', 'os_type', 'geo_country',
+            # Previously missing -> left as raw strings -> crashed IsolationForest/XGBoost at fit time.
+            'account_type', 'principal_type', 'is_known_proxy_or_tor', 'ua_family', 'ua_version',
+        ]
         
         for col in categorical_cols:
             if col in X.columns:

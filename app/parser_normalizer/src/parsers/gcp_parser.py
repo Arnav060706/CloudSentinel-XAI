@@ -1,5 +1,5 @@
 from typing import Any, Dict
-from src.normalizer import normalize_severity_from_score
+from src.normalizer import normalize_severity_from_score, normalize_timestamp
 
 class GCPCloudAuditParser:
     def parse(self, raw_log: Dict[str, Any]) -> Dict[str, Any]:
@@ -15,7 +15,12 @@ class GCPCloudAuditParser:
         severity = normalize_severity_from_score(scaled_score)
 
         return {
-            "timestamp": raw_log.get("timestamp"),
+            # Was previously passed straight through from raw_log["timestamp"]
+            # with no parsing, unlike AWS/Azure. That meant a malformed GCP
+            # timestamp surfaced as an opaque Pydantic error instead of a
+            # clean validation failure, and there was no guaranteed UTC
+            # normalization. Now consistent with the other two parsers.
+            "timestamp": normalize_timestamp(raw_log.get("timestamp", "")),
             "source_cloud": "GCP",
             "event_type": proto.get("methodName", "Unknown"),
             "user_id": proto.get("authenticationInfo", {}).get("principalEmail", "Unknown"),
