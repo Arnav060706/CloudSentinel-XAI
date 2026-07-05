@@ -1,392 +1,365 @@
 # app/services/risk_engine.py
 """
-HawkesRiskEngine — Self-Exciting Cross-Cloud Risk Intensity Engine
-==================================================================
+RiskEngine — Simple Decayed Cross-Cloud Risk Score
+==================================================
 
-Implements the formalized Hawkes-process risk intensity function for
-CloudSentinel-XAI, as specified in the architecture document:
+This is a deliberately SIMPLE risk score. It is NOT a Hawkes point process
+(an earlier version was; that framing, plus maximum-likelihood fitting and a
+goodness-of-fit test, was removed to keep the engine easy to understand and
+easy to defend). If a reviewer or advisor later wants the point-process
+version back, it lives in the project history.
 
-    λ_v(t) = λ₀ + Σᵢ [ κᵢ · g(C_active(t)) · exp(-β · (t - tᵢ)) ]
+THE WHOLE MODEL IN THREE PLAIN RULES
+------------------------------------
+  1. Every recent event adds risk. How much = how anomalous it is
+     (the anomaly_score from the Isolation Forest, a number in [0, 1]).
+  2. Old risk fades. An event's weight HALVES every `half_life_seconds`.
+     So a fresh event counts fully; one that is `half_life` old counts half;
+     one that is two half-lives old counts a quarter; and so on.
+  3. Crossing clouds multiplies the total. Each NEW cloud an identity touches
+     (beyond what is normal for that identity) multiplies the risk by
+     `per_cloud_multiplier`.
 
-where:
-    λ₀              — baseline idle intensity (lambda_0)
-    κᵢ              — per-event excitation weight: κ · anomaly_score_i
-                       (anomaly_score from Isolation Forest, range [0,1])
-    g(C_active(t))  — cross-cloud diversity multiplier:
-                       exp(γ · (|C_active(t)| - 1))
-    β               — temporal decay rate
-    tᵢ              — ACTUAL timestamp of event i (not a mock offset)
-    t               — current evaluation time
+The formula is literally:
 
-Cross-cloud diversity multiplier behaviour
-------------------------------------------
-  |C_active| = 1  →  g = exp(0) = 1.0   (single cloud, no amplification)
-  |C_active| = 2  →  g = exp(γ)          (second cloud crossed — jumps by e^γ)
-  |C_active| = 3  →  g = exp(2γ)         (all three clouds — maximum amplification)
+    risk = baseline
+         + cloud_multiplier * Σ_i ( anomaly_i * 0.5 ** (age_i / half_life) )
 
-Monotonicity lemma (for paper / patent)
-----------------------------------------
-  For fixed event count and timestamps, λ_v(t) is strictly increasing in
-  |C_active(t)|. Proof: g is strictly increasing in its argument (exp is
-  monotone), and the sum of excitation terms is strictly positive for any
-  non-empty active window.
+    cloud_multiplier = per_cloud_multiplier ** (number of NEW clouds crossed)
 
-Pipeline integration note
---------------------------
-  This engine expects events that have been scored by the ML pipeline
-  (Isolation Forest + XGBoost). Each event dict must include:
-    - "timestamp"      : ISO-8601 string (actual event time, not arrival time)
-    - "source_cloud"   : "AWS" | "AZURE" | "GCP"
-    - "anomaly_score"  : float in [0, 1] — from Isolation Forest
-                         (negative Isolation Forest scores are remapped to [0,1])
-    - "phase_confidence" : float in [0, 1] — from XGBoost (optional; used if
-                           anomaly_score is absent)
-  Do NOT pass raw normalized events here; the severity weight will default
-  to 0.1 and the Hawkes process degenerates to a uniform weighted counter.
+Then we squash risk into a 0..1 "score" with a simple saturating curve
+(risk / (risk + 1)) and raise a critical alert when the score crosses a
+threshold. No sigmoids to calibrate, no exponentials to fear — just a
+weighted, time-decayed sum with a cross-cloud multiplier.
 
-Parameter fitting
------------------
-  Default parameters are reasonable starting points.
-  Run fit_parameters_mle() on a labeled alert sequence to obtain
-  maximum-likelihood estimates tuned to your specific dataset.
+WHY "NEW clouds" and not just "all clouds"?
+-------------------------------------------
+Some legitimate identities are normally multi-cloud (DevOps engineers, CI/CD
+service accounts, multi-cloud tools). Multiplying THEM up would cause false
+alarms. So the multiplier only counts clouds an identity touches BEYOND its
+learned-normal set (its "baseline"). If we have no baseline for an identity
+yet, we fall back to counting clouds beyond the first — which still means a
+single-cloud identity is never amplified.
+
+WHY human vs automation?
+------------------------
+Automation is expected to be cross-cloud, so automation principals use a
+gentler `automation_cloud_multiplier`. A human suddenly going cross-cloud is
+more suspicious than a pipeline that always was.
+
+Pipeline integration (unchanged from before)
+---------------------------------------------
+MultiCloudGraphEngine.process_event() returns:
+    (entity_id, active_events, is_new, method, lifetime_clouds)
+Call:
+    risk = engine.calculate_intensity(
+        active_events, lifetime_clouds=lifetime_clouds,
+        entity_id=entity_id, principal_type=<optional>)
+
+Output dict keeps every key earlier code depends on (risk_intensity,
+scaled_score, cloud_span_count, active_clouds, diversity_multiplier,
+is_critical, dominant_signal, event_contributions, ...), so ingest.py,
+db_flusher.py and metrics_exporter.py need no changes.
 """
 
-import math
 import time
+import math
 import datetime
 import logging
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Iterable
 
 logger = logging.getLogger(__name__)
 
 
-class HawkesRiskEngine:
+def _finite(x, default=0.0):
+    """Return x as a finite float, or `default` for None/NaN/inf/garbage."""
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return default
+    return xf if math.isfinite(xf) else default
+
+
+class RiskEngine:
     """
-    Self-exciting point process risk engine with cross-cloud diversity multiplier.
+    Simple time-decayed cross-cloud risk score.
 
     Parameters
     ----------
-    baseline_rate : float
-        λ₀ — idle risk intensity of a quiet corporate environment.
-        Default 0.05 (calibrate against your benign-traffic baseline).
-    decay_rate : float
-        β — exponential decay rate. Higher β means recent events dominate
-        and old events fade quickly. At β=0.1 and a 60-second window,
-        an event 60s old retains exp(-0.1*60) ≈ 0.2% of its initial weight.
-        Default 0.1.
-    base_excitation : float
-        κ — base excitation weight per event (before anomaly_score scaling).
-        Default 0.3.
-    amplification_gamma : float
-        γ — cross-cloud diversity amplification rate. At γ=1.5:
-          1 cloud  → ×1.0
-          2 clouds → ×4.5
-          3 clouds → ×20.1
-        Tune this against your detection-latency / false-positive trade-off.
-        Default 1.5.
+    baseline : float
+        Small constant risk of a quiet environment. Default 0.05.
+    half_life_seconds : float
+        An event's weight halves every this many seconds. Smaller = risk fades
+        faster. Default 30.0 (weight halves every 30s).
+    per_cloud_multiplier : float
+        Risk is multiplied by this for each NEW cloud a (human) identity
+        crosses beyond its normal set. Default 3.0
+        (0 new clouds -> ×1, 1 -> ×3, 2 -> ×9).
+    automation_cloud_multiplier : float
+        Gentler per-cloud multiplier for automation/service principals, which
+        are expected to be cross-cloud. Default 1.7.
     alert_threshold : float
-        Raw λ_v value above which is_critical is True. Calibrate by running
-        your benign traffic baseline through the engine and setting this at
-        the 99th percentile of benign lambda values + margin.
-        Default 0.75 (pre-calibration placeholder).
+        Scaled score (0..1) at or above which is_critical is True.
+        Default 0.75 (i.e. raw risk >= 3.0). Set from benign data with
+        recalibrate_threshold().
     """
 
-    # Supported cloud provider identifiers (case-insensitive matching)
-    _KNOWN_CLOUDS: Set[str] = {"AWS", "AZURE", "GCP", "ENTRA-ID"}
+    _AUTOMATION_PRINCIPAL_TYPES: Set[str] = {
+        "SERVICEACCOUNT", "ASSUMEDROLE", "ROLE", "FEDERATEDUSER",
+        "AWSSERVICE", "AWSACCOUNT",
+    }
+    _AUTOMATION_UA_HINTS = (
+        "boto", "aws-cli", "aws-sdk", "terraform", "botocore", "azure-sdk",
+        "azure-cli", "google-api", "gcloud", "kubectl", "curl", "powershell",
+        "python-requests", "go-http", "okhttp",
+    )
 
     def __init__(
         self,
-        baseline_rate: float = 0.05,
-        decay_rate: float = 0.1,
-        base_excitation: float = 0.3,
-        amplification_gamma: float = 1.5,
+        baseline: float = 0.05,
+        half_life_seconds: float = 30.0,
+        per_cloud_multiplier: float = 3.0,
+        automation_cloud_multiplier: float = 1.7,
         alert_threshold: float = 0.75,
     ):
-        # Validate parameters
-        if baseline_rate < 0:
-            raise ValueError("baseline_rate (λ₀) must be non-negative")
-        if decay_rate <= 0:
-            raise ValueError("decay_rate (β) must be strictly positive")
-        if base_excitation <= 0:
-            raise ValueError("base_excitation (κ) must be strictly positive")
-        if amplification_gamma <= 0:
-            raise ValueError("amplification_gamma (γ) must be strictly positive")
+        if baseline < 0:
+            raise ValueError("baseline must be non-negative")
+        if half_life_seconds <= 0:
+            raise ValueError("half_life_seconds must be positive")
+        if per_cloud_multiplier < 1:
+            raise ValueError("per_cloud_multiplier must be >= 1")
+        if not (1 <= automation_cloud_multiplier <= per_cloud_multiplier):
+            raise ValueError("automation_cloud_multiplier must be in [1, per_cloud_multiplier]")
 
-        self.lambda_0 = baseline_rate
-        self.beta = decay_rate
-        self.kappa = base_excitation
-        self.gamma = amplification_gamma
-        self.alert_threshold = alert_threshold
+        self.baseline = float(baseline)
+        self.half_life = float(half_life_seconds)
+        self.per_cloud_multiplier = float(per_cloud_multiplier)
+        self.automation_cloud_multiplier = float(automation_cloud_multiplier)
+        self.alert_threshold = float(alert_threshold)
 
-        # Running calibration data: track observed lambda_v values so the
-        # sigmoid normalization can be recalibrated without a full restart.
-        self._observed_max_lambda: float = baseline_rate
-        self._intensity_history: List[float] = []
+        # Learned "normal" cloud footprint per identity: entity_key -> set(clouds).
+        self._entity_baselines: Dict[str, Set[str]] = {}
 
-    # ------------------------------------------------------------------ #
-    # Public API                                                           #
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
+    # Main entry point                                                   #
+    # ================================================================== #
 
     def calculate_intensity(
         self,
         active_events: List[dict],
+        lifetime_clouds: Optional[Iterable[str]] = None,
         eval_time: Optional[float] = None,
+        entity_id: Optional[str] = None,
+        principal_type: Optional[str] = None,
     ) -> dict:
         """
-        Computes the current risk intensity λ_v(t) for an entity node.
+        Compute the risk score for one entity from its recent events.
 
-        Parameters
-        ----------
-        active_events : List[dict]
-            Events currently inside the sliding window for this entity,
-            as returned by MultiCloudGraphEngine.process_event().
-            Each dict must include "timestamp", "source_cloud", and
-            "anomaly_score" (from the ML inference layer).
-        eval_time : float, optional
-            Unix timestamp to evaluate at. Defaults to time.time().
-            Pass a fixed value in tests / replay scenarios for determinism.
-
-        Returns
-        -------
-        dict with keys:
-            risk_intensity      : float  — raw λ_v(t)
-            scaled_score        : float  — sigmoid-normalized to [0, 1]
-            cloud_span_count    : int    — |C_active(t)|
-            active_clouds       : list   — which CSPs are present
-            diversity_multiplier: float  — g(C_active(t))
-            is_critical         : bool   — scaled_score >= alert_threshold
-            event_contributions : list   — per-event breakdown (for SHAP / XAI)
+        (The method name is kept as `calculate_intensity` so the rest of the
+        pipeline doesn't need changes.)
         """
-        t = eval_time if eval_time is not None else time.time()
+        # When did we evaluate "now"? Default to the newest event's time so
+        # replaying historical data works the same as live (no wall-clock skew).
+        parsed = [p for p in (self._parse_ts(e) for e in active_events) if p is not None]
+        if eval_time is not None:
+            now = _finite(eval_time, time.time())
+        elif parsed:
+            now = max(parsed)
+        else:
+            now = time.time()
 
         if not active_events:
             return self._empty_result()
 
-        # ---- Step 1: Cross-cloud diversity factor -----------------------
-        active_clouds: Set[str] = {
-            str(e.get("source_cloud", "UNKNOWN")).upper()
-            for e in active_events
-        }
-        # Normalize ENTRA-ID to AZURE for cloud-count purposes
-        # (Entra ID events are Azure identity plane, same cloud tenant)
-        active_clouds_normalized = {
-            "AZURE" if c == "ENTRA-ID" else c
-            for c in active_clouds
-        }
-        c_active = len(active_clouds_normalized)
-        diversity_multiplier = math.exp(self.gamma * (c_active - 1))
+        entity_key = self._entity_key(entity_id, active_events)
+        pclass = self._classify_principal(principal_type, active_events)
 
-        # ---- Step 2: Hawkes cascading excitation sum -------------------
-        total_excitation = 0.0
-        event_contributions = []
+        # --- Which clouds has this identity touched? ----------------------
+        window_clouds = {self._normalize_cloud(e.get("source_cloud")) for e in active_events}
+        window_clouds.discard("UNKNOWN")
 
-        for event in active_events:
-            # Actual event timestamp — NOT a mock offset.
-            # This is the critical fix: temporal decay must reflect when the
-            # event actually occurred, so older events contribute less.
-            t_i = self._parse_event_timestamp(event)
+        if lifetime_clouds is not None:
+            lifetime = {self._normalize_cloud(c) for c in lifetime_clouds}
+            lifetime.discard("UNKNOWN")
+        else:
+            lifetime = set(window_clouds)
+        if not lifetime:
+            lifetime = {"UNKNOWN"}
+
+        # --- Rule 3: how many NEW clouds beyond this identity's normal? ----
+        baseline_clouds = self._entity_baselines.get(entity_key)
+        if baseline_clouds:
+            novel_count = len(lifetime - baseline_clouds)
+        else:
+            novel_count = max(0, len(lifetime) - 1)  # first cloud is "free"
+
+        per_cloud = (self.per_cloud_multiplier if pclass == "human"
+                     else self.automation_cloud_multiplier)
+        cloud_multiplier = per_cloud ** novel_count
+
+        # --- Rules 1 & 2: time-decayed sum of anomaly scores --------------
+        decayed_sum = 0.0
+        contributions = []
+        for e in active_events:
+            t_i = self._parse_ts(e)
             if t_i is None:
-                logger.warning(
-                    "Event missing valid 'timestamp' field — skipping contribution. "
-                    "Event keys: %s", list(event.keys())
-                )
+                logger.warning("Event missing/invalid 'timestamp' — skipping.")
                 continue
+            age = now - t_i
+            if age < 0:
+                age = 0.0  # future event (clock skew) counts as "now"
 
-            delta_t = max(0.0, t - t_i)
+            anomaly = e.get("anomaly_score")
+            if anomaly is None:
+                anomaly = e.get("phase_confidence", 0.1)
+            anomaly = min(1.0, max(0.0, _finite(anomaly, 0.1)))
 
-            # Per-event excitation weight: κ × anomaly_score_i
-            # anomaly_score comes from Isolation Forest (not from ml_labels).
-            # If missing, default to 0.1 and log a warning — this usually
-            # means the risk engine is receiving un-scored events.
-            anomaly_score = event.get("anomaly_score")
-            if anomaly_score is None:
-                anomaly_score = event.get("phase_confidence", 0.1)
-                if anomaly_score == 0.1:
-                    logger.warning(
-                        "Event for principal '%s' has no anomaly_score or "
-                        "phase_confidence — defaulting to 0.1. Ensure ML "
-                        "inference runs before risk scoring.",
-                        event.get("principal", "unknown"),
-                    )
-            # Clamp to [0, 1]
-            anomaly_score = max(0.0, min(1.0, float(anomaly_score)))
-            kappa_i = self.kappa * anomaly_score
-
-            # Exponentially decaying contribution
-            decay_factor = math.exp(-self.beta * delta_t)
-            contribution = kappa_i * decay_factor
-
-            total_excitation += contribution
-            event_contributions.append({
-                "principal": event.get("principal", ""),
-                "source_cloud": event.get("source_cloud", ""),
-                "anomaly_score": round(anomaly_score, 4),
-                "delta_t_seconds": round(delta_t, 2),
-                "decay_factor": round(decay_factor, 4),
+            weight = 0.5 ** (age / self.half_life)   # halves every half_life seconds
+            contribution = anomaly * weight
+            decayed_sum += contribution
+            contributions.append({
+                "principal": e.get("principal", ""),
+                "source_cloud": self._normalize_cloud(e.get("source_cloud")),
+                "anomaly_score": round(anomaly, 4),
+                "age_seconds": round(age, 2),
+                "weight": round(weight, 4),
                 "contribution": round(contribution, 6),
             })
 
-        # ---- Step 3: Final intensity -----------------------------------
-        # Formula: λ_v(t) = λ₀ + g(C_active) · Σ κᵢ · exp(-β(t - tᵢ))
-        # g factors out of the sum because it depends only on C_active(t),
-        # which is constant for the current window evaluation.
-        lambda_v = self.lambda_0 + (diversity_multiplier * total_excitation)
+        # --- Combine ------------------------------------------------------
+        risk = self.baseline + cloud_multiplier * decayed_sum
+        risk = _finite(risk, self.baseline)
 
-        # ---- Step 4: Calibrated sigmoid normalization ------------------
-        # Track running max for adaptive calibration.
-        scaled_score = self._sigmoid_normalize(lambda_v)
-        self._update_calibration(lambda_v)
-        result = {
-            "risk_intensity": round(lambda_v, 6),
-            "scaled_score": round(scaled_score, 4),
-            "cloud_span_count": c_active,
-            "active_clouds": sorted(active_clouds_normalized),
-            "diversity_multiplier": round(diversity_multiplier, 4),
-            "is_critical": scaled_score >= self.alert_threshold,
-            "event_contributions": event_contributions,
-            # Included for SHAP / faithfulness gate: which features drove the score
-            "dominant_signal": self._identify_dominant_signal(
-                lambda_v, diversity_multiplier, total_excitation, c_active
-            ),
+        # Squash to 0..1 (saturating curve; approaches 1 as risk grows).
+        scaled = risk / (risk + 1.0)
+        is_critical = scaled >= self.alert_threshold
+
+        return {
+            "risk_intensity": round(risk, 6),
+            "scaled_score": round(scaled, 4),
+            "cloud_span_count": len(lifetime) if lifetime != {"UNKNOWN"} else 0,
+            "window_cloud_span_count": len(window_clouds),
+            "novel_cloud_span_count": novel_count,
+            "baseline_cloud_span_count": len(baseline_clouds) if baseline_clouds else 0,
+            "active_clouds": sorted(c for c in lifetime if c != "UNKNOWN"),
+            "diversity_multiplier": round(cloud_multiplier, 4),
+            "principal_class": pclass,
+            "is_critical": bool(is_critical),
+            "event_contributions": contributions,
+            "dominant_signal": self._dominant_signal(risk, novel_count, decayed_sum),
         }
 
-        logger.debug(
-            "λ_v=%.4f scaled=%.4f clouds=%s multiplier=%.2f critical=%s",
-            lambda_v, scaled_score, sorted(active_clouds_normalized),
-            diversity_multiplier, result["is_critical"],
-        )
-        return result
+    # ================================================================== #
+    # Optional helpers (simple, not required to run)                     #
+    # ================================================================== #
 
-    def recalibrate_threshold(self, benign_lambda_values: List[float], percentile: float = 99.0) -> float:
+    def record_baseline(self, entity_id: str, clouds: Iterable[str]) -> None:
         """
-        Sets alert_threshold to the given percentile of observed benign
-        lambda values plus a 10% margin.
-
-        Call this after running your benign traffic baseline through the
-        engine to get an empirically grounded alert threshold rather than
-        using the default placeholder.
-
-        Parameters
-        ----------
-        benign_lambda_values : List[float]
-            Lambda values observed during benign-only traffic periods.
-        percentile : float
-            Percentile to use as the threshold baseline. Default 99.0.
-
-        Returns
-        -------
-        float : the new alert_threshold value.
+        Tell the engine which clouds are NORMAL for an identity, so operating
+        in them is not treated as risky. Additive; call during a benign pass
+        or seed it from known DevOps/service accounts.
         """
-        if not benign_lambda_values:
-            raise ValueError("benign_lambda_values must be non-empty")
+        norm = {self._normalize_cloud(c) for c in clouds}
+        norm.discard("UNKNOWN")
+        if not norm:
+            return
+        self._entity_baselines.setdefault(str(entity_id), set()).update(norm)
 
-        sorted_vals = sorted(benign_lambda_values)
-        idx = min(int(len(sorted_vals) * percentile / 100.0), len(sorted_vals) - 1)
-        threshold = sorted_vals[idx] * 1.10  # 10% margin
-
-        # Convert to scaled domain
-        scaled_threshold = self._sigmoid_normalize(threshold)
-        self.alert_threshold = round(scaled_threshold, 4)
-        logger.info(
-            "Alert threshold recalibrated to %.4f (raw λ=%.4f at p%.0f)",
-            self.alert_threshold, threshold, percentile,
-        )
+    def recalibrate_threshold(self, benign_risk_values: List[float],
+                              percentile: float = 99.0) -> float:
+        """
+        Set alert_threshold from benign traffic: take the given percentile of
+        the benign SCALED scores. Run known-benign data through the engine,
+        collect the risk_intensity values, and pass them here.
+        Returns the new alert_threshold.
+        """
+        if not benign_risk_values:
+            raise ValueError("benign_risk_values must be non-empty")
+        scaled = sorted((r / (r + 1.0)) for r in map(lambda v: _finite(v, 0.0), benign_risk_values))
+        idx = min(int(len(scaled) * percentile / 100.0), len(scaled) - 1)
+        self.alert_threshold = round(min(0.999, scaled[idx]), 4)
+        logger.info("alert_threshold recalibrated to %.4f (p%.0f)", self.alert_threshold, percentile)
         return self.alert_threshold
 
     def get_parameter_summary(self) -> dict:
-        """Returns current parameter state for logging / reproducibility."""
         return {
-            "lambda_0": self.lambda_0,
-            "beta": self.beta,
-            "kappa": self.kappa,
-            "gamma": self.gamma,
+            "baseline": self.baseline,
+            "half_life_seconds": self.half_life,
+            "per_cloud_multiplier": self.per_cloud_multiplier,
+            "automation_cloud_multiplier": self.automation_cloud_multiplier,
             "alert_threshold": self.alert_threshold,
-            "observed_max_lambda": round(self._observed_max_lambda, 4),
+            "tracked_entities": len(self._entity_baselines),
         }
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                     #
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
+    # Internal helpers                                                   #
+    # ================================================================== #
 
-    def _parse_event_timestamp(self, event: dict) -> Optional[float]:
-        """
-        Parses the event's actual occurrence timestamp into a Unix float.
-        Returns None if the field is missing or unparseable.
-        """
-        ts_str = event.get("timestamp")
-        if not ts_str:
+    def _entity_key(self, entity_id, active_events) -> str:
+        if entity_id:
+            return str(entity_id)
+        principals = sorted({str(e.get("principal", "")) for e in active_events if e.get("principal")})
+        return "|".join(principals) if principals else "unknown_entity"
+
+    def _classify_principal(self, principal_type, active_events) -> str:
+        ptype = principal_type
+        if ptype is None:
+            counts: Dict[str, int] = {}
+            for e in active_events:
+                pt = str(e.get("principal_type", "") or "").upper()
+                if pt:
+                    counts[pt] = counts.get(pt, 0) + 1
+            ptype = max(counts, key=counts.get) if counts else ""
+        if str(ptype or "").upper() in self._AUTOMATION_PRINCIPAL_TYPES:
+            return "automation"
+        for e in active_events:
+            ua = str(e.get("ua_family", "") or e.get("user_agent", "")).lower()
+            if any(h in ua for h in self._AUTOMATION_UA_HINTS):
+                return "automation"
+        return "human"
+
+    def _normalize_cloud(self, raw) -> str:
+        c = str(raw or "UNKNOWN").upper()
+        return "AZURE" if c == "ENTRA-ID" else c
+
+    def _parse_ts(self, event) -> Optional[float]:
+        ts = event.get("timestamp")
+        if ts is None:
             return None
+        if isinstance(ts, (int, float)):
+            return float(ts) if math.isfinite(float(ts)) else None
         try:
-            return datetime.datetime.fromisoformat(
-                str(ts_str).replace("Z", "+00:00")
-            ).timestamp()
-        except (ValueError, TypeError) as exc:
-            logger.warning("Could not parse timestamp '%s': %s", ts_str, exc)
+            return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            logger.warning("Could not parse timestamp '%s'", ts)
             return None
 
-    def _sigmoid_normalize(self, lambda_v: float) -> float:
-        """
-        Maps raw λ_v to [0, 1] using a calibrated sigmoid:
-
-            scaled = 1 / (1 + exp(-k · (λ_v - midpoint)))
-
-        where:
-            midpoint = λ₀ × 10  (10× baseline = "moderate concern" inflection)
-            k        = 3 / (observed_max_lambda - λ₀ + ε)  (slope calibration)
-
-        This is strictly preferable to dividing by a hard-coded constant (e.g.
-        /2.0) because:
-          1. It adapts as the engine observes larger lambda values.
-          2. It never clips — extreme events are represented with high but
-             not identical scores, preserving ordinal ranking.
-          3. The inflection point and slope have interpretable semantics.
-        """
-        midpoint = self.lambda_0 * 10.0
-        epsilon = 1e-6
-        dynamic_range = max(self._observed_max_lambda - self.lambda_0, epsilon)
-        k = 3.0 / dynamic_range
-
-        return 1.0 / (1.0 + math.exp(-k * (lambda_v - midpoint)))
-
-    def _update_calibration(self, lambda_v: float) -> None:
-        """Tracks running max for adaptive sigmoid calibration."""
-        if lambda_v > self._observed_max_lambda:
-            self._observed_max_lambda = lambda_v
-        self._intensity_history.append(round(lambda_v, 6))
-        # Keep history bounded (last 10,000 observations)
-        if len(self._intensity_history) > 10_000:
-            self._intensity_history = self._intensity_history[-10_000:]
-
-    def _identify_dominant_signal(
-        self,
-        lambda_v: float,
-        diversity_multiplier: float,
-        total_excitation: float,
-        c_active: int,
-    ) -> str:
-        """
-        Identifies the primary driver of the current risk score.
-        Used by the SHAP faithfulness gate to label the LLM narrative prompt:
-        the LLM should explain whichever signal is actually dominant, not
-        produce a generic "high risk" statement.
-        """
-        if lambda_v <= self.lambda_0 * 1.5:
+    def _dominant_signal(self, risk, novel_count, decayed_sum) -> str:
+        if risk <= self.baseline * 1.5:
             return "baseline_only"
-        if c_active >= 2 and diversity_multiplier > 2.0:
+        if novel_count >= 1:
             return "cross_cloud_diversity"
-        if total_excitation > self.lambda_0 * 5:
+        if decayed_sum > self.baseline * 5:
             return "high_event_volume"
-        return "temporal_excitation_accumulation"
+        return "recent_activity_accumulation"
 
     def _empty_result(self) -> dict:
-        """Returns the baseline result when no events are in the window."""
         return {
-            "risk_intensity": round(self.lambda_0, 6),
-            "scaled_score": round(self._sigmoid_normalize(self.lambda_0), 4),
+            "risk_intensity": round(self.baseline, 6),
+            "scaled_score": round(self.baseline / (self.baseline + 1.0), 4),
             "cloud_span_count": 0,
+            "window_cloud_span_count": 0,
+            "novel_cloud_span_count": 0,
+            "baseline_cloud_span_count": 0,
             "active_clouds": [],
             "diversity_multiplier": 1.0,
+            "principal_class": "unknown",
             "is_critical": False,
             "event_contributions": [],
             "dominant_signal": "baseline_only",
         }
+
+
+# Backward-compatibility alias. The class is no longer a Hawkes process, but
+# keep the old name importable so nothing breaks if a reference is missed.
+HawkesRiskEngine = RiskEngine
