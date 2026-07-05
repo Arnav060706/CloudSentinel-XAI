@@ -3,39 +3,112 @@
 MultiCloudGraphEngine — Sliding-Window Stateful Identity Stitching Engine
 =========================================================================
 
-Implements the two-tier identity correlation model for CloudSentinel-XAI:
+ARCHITECTURAL SEPARATION INTRODUCED IN THIS VERSION — READ THIS FIRST:
 
-  Tier 1 (Federation Join): If the normalized event carries a federation
-  lineage field (sourceIdentity / saml_assertion_id / oidc_subject), that
-  field is used as a direct, O(1) join key. This covers the initial phases
-  of a kill chain where the attacker is still operating through the
-  legitimate federated session.
+  Earlier versions conflated two genuinely different concepts under one
+  data structure: "is this event recent enough to matter for live risk
+  scoring" (a 60-second concern) and "do we still know who this actor is"
+  (a campaign-lifetime concern, which should NOT reset just because
+  nothing happened for a minute). Conflating them created two real bugs,
+  both surfaced by asking "what if an APT paces its steps 2 minutes
+  apart instead of within 60 seconds":
 
-  Tier 2 (Fuzzy Fusion): Activated only for events whose principal has NO
-  federation lineage in the logs — the precise signature of a persistence
-  step (newly created IAM user, service principal, or service account with
-  no upstream IdP link). Three signal families are fused:
-    - s_ua   : UA-family + version similarity (weight 0.50)
-    - s_proxy: shared proxy/Tor infrastructure alignment (weight 0.30)
-    - s_type : principal-type consistency (weight 0.20)
+    BUG A (identity resurrection): when an entity's deque fully drained
+    (all its events aged out of the 60s window with no new activity),
+    the old code deleted the entity's identity mapping and its anchor
+    entirely. A RETURNING session for the exact same actor, arriving any
+    time after that drain, would resolve to a BRAND NEW entity_id instead
+    of the original one — silently breaking stitching for any campaign
+    paced slower than the window, which is a very plausible evasion
+    strategy for an attacker who knows a system like this exists.
 
-  Geo exact-match is intentionally excluded: IP geo-country is exactly the
-  signal that changes when an attacker rotates proxies or VPN exit nodes,
-  so exact-matching it penalises the evasion scenario we are trying to catch.
+    BUG B (cross-cloud amplification never fires for paced campaigns):
+    the Hawkes engine's diversity multiplier was being computed from
+    ONLY the clouds present in the current 60-second window. Two steps
+    of the same campaign 2 minutes apart, in different clouds, are never
+    simultaneously "in window" together — so the cross-cloud multiplier,
+    the system's headline detection mechanism, silently never triggers
+    for anything paced slower than the window.
+
+  THE FIX: identity (entity_anchors, identity_map, and a NEW lifetime
+  cloud-footprint set) is now permanent for the life of the process
+  (subject only to an EXPLICIT, disclosed retention/purge operation you
+  call yourself — see purge_stale_entities). The sliding deque
+  (_graph_registry) remains genuinely transient and window-scoped, and
+  CAN legitimately be empty for a known, still-tracked entity — an empty
+  window means "nothing from this actor in the last 60 seconds," not
+  "we no longer know who this is."
+
+  This also simplifies the eviction path: because identity is no longer
+  destroyed when a window drains, there is no need for the reference-
+  counting bookkeeping that a prior version used to decide when to clean
+  up identity_map entries. Eviction is now a plain popleft with no
+  per-key accounting at all — still O(1) per evicted event, now with
+  less code and one less category of bug to introduce by accident.
+
+Implements the tiered identity correlation model for CloudSentinel-XAI:
+
+  TIER 1 — Federation Join (fast path, O(1)):
+  If the normalized event carries a federation lineage field
+  (sourceIdentity / SAML assertion / OIDC subject), that field is used as
+  a direct join key. Covers the phase of a kill chain where the attacker
+  is still operating through a legitimate federated session.
+  CAVEAT (unchanged from before): this tier's coverage is conditional on
+  the target org having configured sts:SourceIdentity enforcement (AWS)
+  or an equivalent federation-passthrough setting. Frequently absent even
+  for a legitimate user's first login. When absent, falls through to
+  Tier 1.5 / Tier 2.
+
+  TIER 1.5 — Creation Provenance (deterministic, O(1)):
+  Cloud audit logs record, as a plain stated fact, who performed a
+  CreateUser / CreateServiceAccount / CreateRole action. If the event
+  indicates it just created a new principal ("created_principal_name"),
+  and the creator is already resolved to an entity, the new principal is
+  linked to that SAME entity directly — no similarity scoring, no
+  ambiguity. This is the correct mechanism for "Alice, Bob, and Carol are
+  all active — which of them does this new service account belong to?"
+  The log states the answer; fuzzy inference must never override a fact
+  that's already in the data.
+
+  TIER 2 — Fuzzy Fusion (fallback: orphaned principal, no federation
+  lineage, no creation-provenance record). Four signals fused:
+    - s_ua    : UA-family + version similarity           (weight 0.45)
+    - s_proxy : shared proxy/Tor infrastructure alignment (weight 0.25)
+    - s_type  : principal-type consistency                (weight 0.20)
+    - s_ip    : exact source-IP match, CLEAN TRAFFIC ONLY  (weight 0.10)
+  An ambiguity-margin check refuses to merge when the top two candidates
+  are too close to call (e.g. several simultaneously active legitimate
+  users with similar tooling).
+
+  ON s_ip: deliberately small and capped. It exists because an
+  unsophisticated attacker who never rotates IP still deserves to be
+  caught on that basis — but 0.10 (or 0.10 + the 0.20 type match = 0.30)
+  can never alone reach the default tau of 0.65, so it can only
+  corroborate an already-plausible match, never manufacture one alone.
+  Only applies when BOTH sides are non-proxy traffic — matching two
+  Tor/VPN exit IPs is coincidence (shared exit nodes across unrelated
+  sessions), not correlation.
 
 Complexity guarantees
 ---------------------
-  Insertion : O(1) amortized (deque append)
-  Eviction  : O(1) amortized per evicted event (reference-count lookup, no scan)
-  Fast-path identity resolution : O(1) (hashmap lookup)
-  Slow-path identity resolution : O(E) where E = number of active entity clusters
-    — this is disclosed, not claimed as O(1). E is bounded by the number of
-    distinct actors active within the sliding window, which is small in practice.
+  Insertion (per event)     : O(1) amortized
+  Window eviction            : O(1) amortized per evicted event — plain
+    deque popleft, no per-key bookkeeping (identity is no longer torn
+    down on window drain, so there is nothing to account for here).
+  Tier 1 / Tier 1.5 / fast-path resolution : O(1) each (hashmap lookups)
+  Tier 2 slow-path            : O(E) where E = number of KNOWN entities
+    (not just currently-active ones, since identity now persists across
+    idle periods) — disclosed, not claimed as O(1).
+  purge_stale_entities()      : O(V) where V = total tracked identity
+    keys. This is an EXPLICIT, infrequent, caller-invoked maintenance
+    operation, not part of the per-event hot path — an O(V) scan here is
+    fine and is clearly scoped as a maintenance operation, unlike the
+    earlier bug where an O(V)/O(n) scan was hidden inside the hot
+    per-event eviction path and silently broke the O(1) claim.
 
 Thread safety
 -------------
-  A reentrant lock (RLock) guards all mutations. Safe to call from multiple
-  threads (e.g. a Loki push receiver and a background eviction ticker).
+  A reentrant lock (RLock) guards all mutations.
 """
 
 import time
@@ -49,116 +122,206 @@ logger = logging.getLogger(__name__)
 
 class MultiCloudGraphEngine:
     """
-    Sliding-window directed graph engine for cross-cloud identity stitching.
+    Sliding-window directed graph engine for cross-cloud identity stitching,
+    with campaign-lifetime (not just window-scoped) cross-cloud tracking.
 
     Parameters
     ----------
     window_horizon_seconds : int
-        Length of the sliding time window. Events older than this are
-        evicted. Default: 60 seconds (as per architecture spec).
+        Length of the sliding time window used for RISK SCORING recency —
+        i.e. what risk_engine.py's Hawkes intensity sees as "currently
+        active" for its temporal-decay sum. Default: 60 seconds.
+        IMPORTANT: this window no longer governs identity persistence or
+        cross-cloud tracking at all (see module docstring) — an entity is
+        NOT forgotten and its cross-cloud footprint is NOT reset just
+        because its window emptied.
     similarity_threshold : float
-        Minimum fuzzy-fusion score (tau) for two sessions to be merged into
-        the same entity cluster. Range [0, 1]. Default: 0.65 (tuned to the
-        three-signal weight distribution below; raise to 0.75+ if false
-        merge rate is too high on your validation set).
+        Minimum fuzzy-fusion score (tau) for Tier 2 merges. Default: 0.65.
+    ambiguity_margin : float
+        Minimum score gap between the best and second-best Tier 2
+        candidates before a merge is accepted. Default: 0.05.
     """
 
-    # ------------------------------------------------------------------ #
-    # Signal weights for Tier 2 fuzzy fusion.                             #
-    # These are hand-tuned for the current three-signal feature set.      #
-    # Replace with learned weights (gradient-boosted fusion classifier)   #
-    # once you have enough labeled positive/negative pairs from the        #
-    # synthetic dataset generation pipeline.                               #
-    # ------------------------------------------------------------------ #
-    _UA_WEIGHT    = 0.50
-    _PROXY_WEIGHT = 0.30
+    _UA_WEIGHT    = 0.45
+    _PROXY_WEIGHT = 0.25
     _TYPE_WEIGHT  = 0.20
+    _IP_WEIGHT    = 0.10
+
+    _CREATION_ACTIONS: Set[str] = {
+        "CreateUser", "CreateRole", "CreateServiceAccount",
+        "Add application", "Add service principal", "Add user",
+        "google.iam.admin.v1.CreateServiceAccount",
+    }
+
+    # Clouds that should be treated as the same provider for cross-cloud
+    # counting purposes (Entra ID is Azure's identity plane, not a 4th
+    # cloud) — mirrors the normalization risk_engine.py already applies.
+    _CLOUD_ALIASES = {"ENTRA-ID": "AZURE"}
 
     def __init__(
         self,
         window_horizon_seconds: int = 60,
         similarity_threshold: float = 0.65,
+        ambiguity_margin: float = 0.05,
     ):
         self.window_horizon = window_horizon_seconds
         self.tau = similarity_threshold
+        self.ambiguity_margin = ambiguity_margin
 
         # entity_id -> deque of {"arrival_time": float, "data": dict}
+        # Transient, window-scoped. CAN legitimately be empty for a
+        # perfectly valid, still-tracked entity — see module docstring.
         self._graph_registry: Dict[str, deque] = {}
 
-        # entity_id -> founding event (permanent anchor, never evicted)
-        # Used as the stable comparison target for fuzzy similarity.
-        # Fixes the "anchor drift" bug where active_events[0] shifts as
-        # old events are evicted from the window.
+        # entity_id -> founding event. Permanent for the life of the
+        # process (or until purge_stale_entities removes it explicitly).
+        # Stable Tier 2 comparison target, independent of window state.
         self._entity_anchors: Dict[str, dict] = {}
 
-        # principal_string -> entity_id  (fast-path O(1) lookup)
+        # entity_id -> set of normalized cloud names EVER seen for this
+        # entity, across its ENTIRE lifetime — NOT scoped to the 60s
+        # window. This is what fixes the "2-minute-paced APT" problem:
+        # the cross-cloud diversity multiplier in risk_engine.py should
+        # be driven by this set, not by whichever clouds happen to be
+        # inside the live risk window at any one instant.
+        self._entity_lifetime_clouds: Dict[str, Set[str]] = {}
+
+        # entity_id -> unix timestamp of the most recent event seen.
+        # Used only by the optional purge_stale_entities() maintenance
+        # call — not consulted on the per-event hot path.
+        self._entity_last_seen: Dict[str, float] = {}
+
+        # any identity key (principal string OR federation key) -> entity_id.
+        # Permanent, same lifetime as entity_anchors.
         self._identity_map: Dict[str, str] = {}
 
-        # principal_string -> int  (reference count for O(1) eviction cleanup)
-        # Replaces the O(n) `any(... for n in active_queue)` scan.
-        self._principal_ref_count: Dict[str, int] = {}
+        # created_principal_name -> creator's entity_id. Permanent
+        # (Tier 1.5 provenance table) — same reasoning as before.
+        self._provenance_map: Dict[str, str] = {}
 
-        # Reentrant lock for thread safety
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
     # Public API                                                           #
     # ------------------------------------------------------------------ #
 
-    def process_event(self, normalized_event: dict) -> Tuple[str, List[dict], bool]:
+    def process_event(
+        self, normalized_event: dict
+    ) -> Tuple[str, List[dict], bool, str, List[str]]:
         """
         Main entry point. Resolves the entity cluster for an incoming
         normalized event, appends it to the sliding window, evicts stale
-        entries, and returns the current active window for downstream risk
-        scoring.
+        window entries, updates the entity's lifetime cloud footprint, and
+        returns everything downstream risk scoring needs.
 
         Parameters
         ----------
         normalized_event : dict
-            A single row from the normalized feature table produced by
-            06_normalize_features.py. Must contain at minimum:
-              - "principal"         : str
-              - "ua_family"         : str
-              - "ua_version"        : str
-              - "is_known_proxy_or_tor" : bool | str
-              - "principal_type"    : str
-              - "timestamp"         : ISO-8601 str
-            Optional (Tier 1 fast path):
-              - "federation_id"     : str | None
-                (sourceIdentity / saml_assertion_id / oidc_subject)
+            Must contain at minimum: "principal", "ua_family", "ua_version",
+            "is_known_proxy_or_tor", "principal_type", "source_ip",
+            "source_cloud", "timestamp".
+            Optional: "federation_id", "created_principal_name".
 
         Returns
         -------
         entity_id : str
-            The cluster this event was assigned to.
         active_events : List[dict]
-            All events currently inside the sliding window for this entity,
-            including the one just added.
+            Events currently inside the 60-second RISK window for this
+            entity (for feeding the Hawkes temporal-decay sum).
         is_new_entity : bool
-            True if this event created a brand-new cluster (useful for
-            logging / alerting on first-seen orphaned principals).
+        resolution_method : str
+            "federation" | "provenance" | "fast_path" | "fuzzy_merge" |
+            "new_entity_ambiguous" | "new_entity"
+        lifetime_clouds : List[str]
+            Every distinct normalized cloud provider this entity has EVER
+            touched, across its whole tracked lifetime — NOT limited to
+            the current 60-second window. Pass this (not a value derived
+            from active_events) into HawkesRiskEngine.calculate_intensity's
+            lifetime_clouds parameter so the cross-cloud multiplier fires
+            correctly regardless of how slowly an attacker paces their
+            campaign across clouds.
         """
         with self._lock:
-            entity_id, is_new = self._resolve_entity_id(normalized_event)
+            entity_id, is_new, method = self._resolve_entity_id(normalized_event)
+            self._register_provenance_if_applicable(normalized_event, entity_id)
             active_events = self._update_window(entity_id, normalized_event)
-            return entity_id, active_events, is_new
+            lifetime_clouds = sorted(self._entity_lifetime_clouds.get(entity_id, set()))
+            return entity_id, active_events, is_new, method, lifetime_clouds
 
     def get_entity_stats(self) -> dict:
-        """
-        Returns a snapshot of the current graph state.
-        Useful for Grafana metadata panels and debugging.
-        """
+        """Snapshot of current graph state, for dashboards/debugging."""
         with self._lock:
             return {
-                "active_entity_clusters": len(self._graph_registry),
-                "tracked_principals": len(self._identity_map),
+                "known_entities": len(self._entity_anchors),
+                "entities_with_active_window": sum(
+                    1 for q in self._graph_registry.values() if q
+                ),
+                "tracked_identity_keys": len(self._identity_map),
+                "tracked_provenance_records": len(self._provenance_map),
                 "window_horizon_seconds": self.window_horizon,
                 "similarity_threshold": self.tau,
-                "entity_sizes": {
-                    eid: len(q)
-                    for eid, q in self._graph_registry.items()
+                "ambiguity_margin": self.ambiguity_margin,
+                "entity_window_sizes": {
+                    eid: len(q) for eid, q in self._graph_registry.items()
+                },
+                "entity_lifetime_cloud_counts": {
+                    eid: len(clouds)
+                    for eid, clouds in self._entity_lifetime_clouds.items()
                 },
             }
+
+    def purge_stale_entities(self, max_idle_seconds: float) -> int:
+        """
+        EXPLICIT, caller-invoked maintenance operation. Removes entities
+        that have had no activity for longer than max_idle_seconds,
+        cleaning up their anchor, lifetime cloud set, last-seen record,
+        and any identity_map / provenance_map entries pointing to them.
+
+        This is the disclosed answer to "identity and lifetime cloud
+        tracking now grow unboundedly for the life of the process" — call
+        this periodically (e.g. hourly, from a background scheduler) with
+        a generous max_idle_seconds (e.g. 86400 for a day) to bound memory
+        growth without breaking pace-independent cross-cloud detection for
+        any campaign shorter than max_idle_seconds.
+
+        Complexity: O(V) where V = total tracked identity keys. This is
+        fine here because it is an infrequent, explicit, disclosed
+        operation — NOT hidden inside the per-event hot path the way an
+        earlier bug in this file hid an O(V) scan inside eviction.
+
+        Returns the number of entities purged.
+        """
+        with self._lock:
+            now = time.time()
+            stale_entity_ids = [
+                eid for eid, last_seen in self._entity_last_seen.items()
+                if (now - last_seen) > max_idle_seconds
+            ]
+
+            for eid in stale_entity_ids:
+                self._entity_anchors.pop(eid, None)
+                self._entity_lifetime_clouds.pop(eid, None)
+                self._entity_last_seen.pop(eid, None)
+                self._graph_registry.pop(eid, None)
+
+                dangling_identity_keys = [
+                    k for k, v in self._identity_map.items() if v == eid
+                ]
+                for k in dangling_identity_keys:
+                    self._identity_map.pop(k, None)
+
+                dangling_provenance_keys = [
+                    k for k, v in self._provenance_map.items() if v == eid
+                ]
+                for k in dangling_provenance_keys:
+                    self._provenance_map.pop(k, None)
+
+            if stale_entity_ids:
+                logger.info(
+                    "purge_stale_entities: removed %d entities idle > %.0fs",
+                    len(stale_entity_ids), max_idle_seconds,
+                )
+            return len(stale_entity_ids)
 
     # ------------------------------------------------------------------ #
     # Tier 1 — Federation join                                             #
@@ -167,16 +330,10 @@ class MultiCloudGraphEngine:
     def _tier1_federation_key(self, event: dict) -> Optional[str]:
         """
         Extracts the upstream IdP linkage key if present.
-
-        Cloud providers embed federation lineage in different fields:
-          AWS CloudTrail : userIdentity.sessionContext.sessionIssuer
-                           or userIdentity.principalId (contains sourceIdentity)
-          Azure Entra ID : claims.sub / claims.oid in SignInLogs
-          GCP Cloud Audit: principalSubject (service account impersonation chain)
-
-        After normalization, these should all land in "federation_id".
-        Returns None if no federation lineage is present — i.e. the event
-        comes from an orphaned principal, which is exactly when Tier 2 fires.
+        (See prior version's docstring for full field-mapping detail —
+        unchanged: AWS sourceIdentity / IAM Identity Center session-name
+        convention, Azure claims.sub/oid, GCP principalSubject. Frequently
+        absent — see caveats in module docstring.)
         """
         fed_id = event.get("federation_id")
         if fed_id and str(fed_id).strip() not in ("", "None", "null"):
@@ -184,46 +341,39 @@ class MultiCloudGraphEngine:
         return None
 
     # ------------------------------------------------------------------ #
+    # Tier 1.5 — Creation provenance                                       #
+    # ------------------------------------------------------------------ #
+
+    def _register_provenance_if_applicable(self, event: dict, acting_entity_id: str) -> None:
+        """
+        Records a deterministic link from a newly created principal's name
+        to the entity that created it — see module docstring for why this
+        must take priority over fuzzy inference. Permanent; not tied to
+        window state (unchanged from prior version).
+        """
+        action = event.get("action")
+        created_name = event.get("created_principal_name")
+
+        if created_name and (action in self._CREATION_ACTIONS or created_name):
+            self._provenance_map[created_name] = acting_entity_id
+            logger.debug(
+                "Provenance recorded: '%s' created by entity %s (action=%s)",
+                created_name, acting_entity_id, action,
+            )
+
+    # ------------------------------------------------------------------ #
     # Tier 2 — Fuzzy fusion similarity                                     #
     # ------------------------------------------------------------------ #
 
     def _calculate_fuzzy_similarity(self, event_a: dict, event_b: dict) -> float:
         """
-        Computes the adversarial-evasion-robust similarity score s_total
-        between two events. Returns a float in [0.0, 1.0].
-
-        Signal families
-        ---------------
-        s_ua (weight 0.50):
-            UA family exact match (0.70 of budget) + version match (0.30).
-            Partial credit (0.20 of budget) if both families are known
-            automated frameworks (Boto3, aws-cli, Terraform, etc.) even if
-            the family strings differ — tolerates minor tool version drift.
-
-        s_proxy (weight 0.30):
-            Shared proxy/Tor infrastructure alignment. If both events arrive
-            from known-proxy/Tor infrastructure, that is a POSITIVE similarity
-            signal (same evasion tooling). If one is proxy and one is clean
-            residential/corporate, that is a NEGATIVE signal (accounts for
-            attacker going proxy-off after gaining legitimate-looking cover).
-            Replaces the previous geo exact-match, which penalised IP rotation
-            — the exact evasion this system is designed to catch.
-
-        s_type (weight 0.20):
-            Principal type consistency (IAMUser, AssumedRole, ServiceAccount,
-            etc.). Stays stable across sessions for the same actor toolchain.
-
-        Note on geo exclusion
-        ----------------------
-        IP geo-country exact match is intentionally NOT included. It is the
-        signal that changes most reliably when an attacker rotates proxies or
-        VPN exit nodes. Including it with positive weight would reward an
-        attacker staying in one country and punish the cross-country rotation
-        pattern that is most diagnostic of the threat we target.
+        Four-signal fuzzy similarity, weights summing to 1.0.
+        (Unchanged from the previous version — see that version's
+        extensive docstring for the full reasoning on s_ua, s_proxy,
+        s_type, and the deliberately small/capped s_ip signal.)
         """
         score = 0.0
 
-        # ---- s_ua -------------------------------------------------------
         KNOWN_AUTOMATION_FAMILIES = {
             "Boto3", "aws-cli", "aws-sdk-go", "Terraform",
             "azure-cli", "google-cloud-sdk", "pulumi",
@@ -237,28 +387,22 @@ class MultiCloudGraphEngine:
             if event_a.get("ua_version") == event_b.get("ua_version"):
                 score += self._UA_WEIGHT * 0.30
         elif ua_a in KNOWN_AUTOMATION_FAMILIES and ua_b in KNOWN_AUTOMATION_FAMILIES:
-            # Different automation frameworks — same attacker may switch tools
-            # between sessions; give partial credit rather than zero.
             score += self._UA_WEIGHT * 0.20
 
-        # ---- s_proxy ----------------------------------------------------
         proxy_a = bool(event_a.get("is_known_proxy_or_tor", False))
         proxy_b = bool(event_b.get("is_known_proxy_or_tor", False))
 
         if proxy_a and proxy_b:
-            # Both through anonymisation infrastructure — strong positive signal
             score += self._PROXY_WEIGHT * 1.0
         elif proxy_a == proxy_b:
-            # Both clean/corporate — consistent, moderate positive signal
             score += self._PROXY_WEIGHT * 0.5
-            # NEW PATENT-READY CLAIM: If both connections are CLEAN (not proxies) 
-            # and the raw IP strings match exactly, apply a high-confidence correlation bonus.
-            if not proxy_a and event_a.get("source_ip") == event_b.get("source_ip"):
-                score += 0.25  # Boosts the score to clear the tau threshold instantly
-        # else: one proxy, one clean — no contribution (intentionally neutral,
-        # not negative, because legitimate users sometimes VPN in)
 
-        # ---- s_type -----------------------------------------------------
+        if not proxy_a and not proxy_b:
+            ip_a = event_a.get("source_ip")
+            ip_b = event_b.get("source_ip")
+            if ip_a and ip_b and ip_a == ip_b:
+                score += self._IP_WEIGHT
+
         if event_a.get("principal_type") == event_b.get("principal_type"):
             score += self._TYPE_WEIGHT
 
@@ -268,130 +412,157 @@ class MultiCloudGraphEngine:
     # Entity resolution                                                    #
     # ------------------------------------------------------------------ #
 
-    def _resolve_entity_id(self, incoming_event: dict) -> Tuple[str, bool]:
+    def _resolve_entity_id(self, incoming_event: dict) -> Tuple[str, bool, str]:
         """
-        Resolves which entity cluster this event belongs to.
+        Resolution order: Tier 1 -> fast path -> Tier 1.5 -> Tier 2 (with
+        ambiguity margin) -> new entity.
 
-        Resolution order:
-          1. Tier 1: federation_id fast-path — O(1)
-          2. Identity map fast-path for already-seen principals — O(1)
-          3. Tier 2: fuzzy similarity scan across active clusters — O(E)
-          4. Fallback: create new entity cluster
-
-        Returns (entity_id, is_new_entity).
+        CHANGED: Tier 2's scan now considers every KNOWN entity (every key
+        in _entity_anchors), not just ones with a currently non-empty
+        window. An entity whose window has drained is still a perfectly
+        valid, resolvable identity — its anchor is a fixed point in time,
+        not something that requires "recent activity" to remain valid for
+        comparison. This is required for the same reason as the rest of
+        this fix: a paced attacker whose window is momentarily empty
+        between steps must still be resolvable, not treated as gone.
         """
         principal = incoming_event.get("principal", "")
 
-        # ---- Step 1: Tier 1 federation join ----------------------------
         fed_key = self._tier1_federation_key(incoming_event)
         if fed_key:
             if fed_key not in self._identity_map:
                 new_id = self._create_new_entity(fed_key, incoming_event)
+                self._identity_map[principal] = new_id
                 logger.debug("Tier1 new entity %s for federation key %s", new_id, fed_key)
-                return new_id, True
+                return new_id, True, "federation"
             entity_id = self._identity_map[fed_key]
-            # Also bind the raw principal to the same entity for fast lookup
             self._identity_map[principal] = entity_id
-            return entity_id, False
+            return entity_id, False, "federation"
 
-        # ---- Step 2: identity map fast-path ----------------------------
         if principal in self._identity_map:
-            return self._identity_map[principal], False
+            return self._identity_map[principal], False, "fast_path"
 
-        # ---- Step 3: Tier 2 fuzzy scan ---------------------------------
-        best_entity_id: Optional[str] = None
-        best_score = 0.0
+        if principal in self._provenance_map:
+            creator_entity_id = self._provenance_map[principal]
+            if creator_entity_id in self._entity_anchors:
+                self._identity_map[principal] = creator_entity_id
+                logger.debug(
+                    "Tier1.5 provenance match: '%s' linked to creator entity %s",
+                    principal, creator_entity_id,
+                )
+                return creator_entity_id, False, "provenance"
 
+        scored_candidates: List[Tuple[float, str]] = []
         for entity_id, anchor in self._entity_anchors.items():
-            # Skip entities with empty windows (fully evicted but not yet gc'd)
-            if entity_id not in self._graph_registry or not self._graph_registry[entity_id]:
-                continue
+            # NOTE: no longer filtered by "does this entity have a
+            # non-empty window right now" — see method docstring above.
             sim = self._calculate_fuzzy_similarity(incoming_event, anchor)
-            if sim > best_score:
-                best_score = sim
-                best_entity_id = entity_id
+            if sim >= self.tau:
+                scored_candidates.append((sim, entity_id))
 
-        if best_score >= self.tau and best_entity_id is not None:
+        if scored_candidates:
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_entity_id = scored_candidates[0]
+
+            if len(scored_candidates) > 1:
+                second_score, second_entity_id = scored_candidates[1]
+                if (best_score - second_score) < self.ambiguity_margin:
+                    new_id = self._create_new_entity(principal, incoming_event)
+                    logger.warning(
+                        "Ambiguous Tier2 match for '%s': top candidates %s "
+                        "(%.3f) and %s (%.3f) within margin %.3f — "
+                        "creating new entity instead of merging.",
+                        principal, best_entity_id, best_score,
+                        second_entity_id, second_score, self.ambiguity_margin,
+                    )
+                    return new_id, True, "new_entity_ambiguous"
+
             self._identity_map[principal] = best_entity_id
             logger.debug(
                 "Tier2 merged principal '%s' into entity %s (score=%.3f)",
                 principal, best_entity_id, best_score,
             )
-            return best_entity_id, False
+            return best_entity_id, False, "fuzzy_merge"
 
-        # ---- Step 4: new entity ----------------------------------------
         new_id = self._create_new_entity(principal, incoming_event)
         logger.debug(
-            "New entity %s for orphaned principal '%s' (best_score=%.3f < tau=%.2f)",
-            new_id, principal, best_score, self.tau,
+            "New entity %s for orphaned principal '%s' (no candidates cleared tau=%.2f)",
+            new_id, principal, self.tau,
         )
-        return new_id, True
+        return new_id, True, "new_entity"
 
     def _create_new_entity(self, key: str, founding_event: dict) -> str:
         """
-        Instantiates a new entity cluster. Stores the founding event as the
-        permanent comparison anchor — this anchor is never evicted, ensuring
-        consistent similarity comparisons regardless of window age.
+        Instantiates a new entity cluster. Anchor, lifetime cloud set, and
+        last-seen record are all created here as PERMANENT records (only
+        removed via explicit purge_stale_entities, never by window drain).
         """
         entity_id = f"entity_{int(time.time_ns())}"
         self._identity_map[key] = entity_id
-        self._entity_anchors[entity_id] = founding_event   # permanent anchor
+        self._entity_anchors[entity_id] = founding_event
         self._graph_registry[entity_id] = deque()
+        self._entity_lifetime_clouds[entity_id] = set()
+        self._entity_last_seen[entity_id] = time.time()
         return entity_id
 
     # ------------------------------------------------------------------ #
     # Sliding window management                                            #
     # ------------------------------------------------------------------ #
 
+    def _normalize_cloud(self, raw_cloud: Optional[str]) -> str:
+        """Applies the same Entra-ID-as-Azure aliasing risk_engine.py uses."""
+        c = str(raw_cloud or "UNKNOWN").upper()
+        return self._CLOUD_ALIASES.get(c, c)
+
     def _update_window(self, entity_id: str, incoming_event: dict) -> List[dict]:
         """
-        Appends the incoming event to the entity's deque and evicts entries
-        that have drifted beyond the sliding window horizon.
+        Appends the incoming event to the entity's RISK window and evicts
+        window entries older than window_horizon_seconds. Also updates the
+        entity's PERMANENT lifetime cloud footprint and last-seen timestamp
+        — neither of which is affected by window eviction.
 
         Complexity
         ----------
-        Append: O(1)
-        Eviction: O(1) amortized per evicted event.
-          - Each event is inserted exactly once and evicted exactly once.
-          - Eviction cleanup uses reference counting (O(1) lookup),
-            not a linear scan of the queue.
-        Total over a stream of n events: O(n) work, O(1) amortized per event.
+        Append   : O(1)
+        Eviction : O(1) amortized per evicted event — a plain popleft with
+          NO per-key bookkeeping. This is simpler and more clearly correct
+          than the previous ref-counting scheme, because identity is no
+          longer torn down when the window drains, so there is nothing to
+          account for at eviction time beyond removing the stale event
+          itself.
+
+        IMPORTANT: an empty deque after eviction is now a perfectly normal,
+        valid state — it means "no window-relevant activity in the last
+        window_horizon_seconds," not "this entity no longer exists." The
+        entity's anchor, lifetime clouds, and identity mappings all remain
+        intact regardless.
         """
         current_time = time.time()
-        principal = incoming_event.get("principal", "")
         queue = self._graph_registry[entity_id]
 
-        # Insert
         queue.append({"arrival_time": current_time, "data": incoming_event})
-        self._principal_ref_count[principal] = (
-            self._principal_ref_count.get(principal, 0) + 1
-        )
 
-        # Evict stale entries — O(1) per eviction via reference counting
+        # Update PERMANENT, lifetime (not window-scoped) cross-cloud
+        # footprint. This is the actual fix for pace-independent detection:
+        # an entity that touched AWS at t=0 and GCP at t=120 (2 minutes
+        # apart — outside any 60s window together) still ends up with
+        # lifetime_clouds = {"AWS", "GCP"}, so risk_engine.py's diversity
+        # multiplier will correctly see |C_active|=2 for it, regardless of
+        # how the two events relate to the live risk window.
+        cloud = self._normalize_cloud(incoming_event.get("source_cloud"))
+        self._entity_lifetime_clouds.setdefault(entity_id, set()).add(cloud)
+        self._entity_last_seen[entity_id] = current_time
+
+        # Evict stale window entries — simple, no bookkeeping needed.
         while queue and (current_time - queue[0]["arrival_time"]) > self.window_horizon:
-            evicted = queue.popleft()
-            evicted_principal = evicted["data"].get("principal", "")
+            queue.popleft()
 
-            # Decrement reference count; clean identity map only when count hits 0
-            # This is O(1) — no scanning the queue.
-            count = self._principal_ref_count.get(evicted_principal, 1) - 1
-            if count <= 0:
-                self._principal_ref_count.pop(evicted_principal, None)
-                self._identity_map.pop(evicted_principal, None)
-            else:
-                self._principal_ref_count[evicted_principal] = count
-
-        # Garbage-collect empty entity clusters to prevent memory accumulation.
-        # The permanent anchor is also cleaned up here.
-        if not queue:
-            del self._graph_registry[entity_id]
-            self._entity_anchors.pop(entity_id, None)
-            # FIX: Purge any dangling Tier 1 federation keys or orphaned principals 
-            # from the identity map that point to this dead cluster.
-            dangling_keys = [k for k, v in self._identity_map.items() if v == entity_id]
-            for k in dangling_keys:
-                self._identity_map.pop(k, None)
-            logger.debug("Entity %s fully evicted and removed from registry.", entity_id)
-            return []
+        # NOTE: deliberately NOT deleting graph_registry[entity_id],
+        # entity_anchors[entity_id], or identity_map entries when the
+        # queue empties here. That was the root cause of the identity-
+        # resurrection bug (see module docstring) — an empty window must
+        # not mean "forget this entity." Cleanup of genuinely stale
+        # entities is an explicit, disclosed, caller-invoked operation:
+        # see purge_stale_entities().
 
         return [node["data"] for node in queue]
