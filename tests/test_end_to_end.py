@@ -68,21 +68,44 @@ def test_lifetime_cross_cloud_span():
 
 
 def test_risk_engine_uses_lifetime_clouds():
-    """Diversity multiplier is driven by lifetime_clouds, not the window."""
-    from app.services.risk_engine import HawkesRiskEngine
+    """Cross-cloud multiplier is driven by lifetime_clouds, not the window."""
+    from app.services.risk_engine import RiskEngine
 
-    eng = HawkesRiskEngine()
+    eng = RiskEngine()
     now = time.time()
     events = [{
         "principal": "p", "source_cloud": "AWS",
         "anomaly_score": 0.9,
-        "timestamp": __import__("datetime").datetime.utcfromtimestamp(now).isoformat(),
+        "timestamp": __import__("datetime").datetime.fromtimestamp(
+            now, __import__("datetime").timezone.utc).isoformat(),
     }]
     single = eng.calculate_intensity(events, lifetime_clouds=["AWS"], eval_time=now)
     multi = eng.calculate_intensity(events, lifetime_clouds=["AWS", "GCP", "AZURE"], eval_time=now)
     assert multi["cloud_span_count"] == 3
     assert multi["diversity_multiplier"] > single["diversity_multiplier"]
     assert multi["risk_intensity"] > single["risk_intensity"]
+
+
+def test_risk_engine_baseline_suppresses_legitimate_multicloud():
+    """An identity whose baseline IS multi-cloud is not amplified (DevOps fix)."""
+    from app.services.risk_engine import RiskEngine
+
+    eng = RiskEngine()
+    now = time.time()
+    ts = __import__("datetime").datetime.fromtimestamp(
+        now, __import__("datetime").timezone.utc).isoformat()
+    events = [{"principal": "devops", "source_cloud": "AWS",
+               "anomaly_score": 0.9, "timestamp": ts}]
+    # Without baseline: 3 clouds amplifies.
+    hot = eng.calculate_intensity(events, lifetime_clouds=["AWS", "GCP", "AZURE"],
+                                  eval_time=now, entity_id="d1")
+    # With baseline = those 3 clouds: no novelty, no amplification.
+    eng.record_baseline("d2", ["AWS", "GCP", "AZURE"])
+    calm = eng.calculate_intensity(events, lifetime_clouds=["AWS", "GCP", "AZURE"],
+                                   eval_time=now, entity_id="d2")
+    assert hot["diversity_multiplier"] > 1.0
+    assert calm["diversity_multiplier"] == 1.0
+    assert calm["novel_cloud_span_count"] == 0
 
 
 def test_ml_bypass_sets_all_fields():
