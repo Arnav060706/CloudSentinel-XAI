@@ -28,7 +28,7 @@ from fastapi import FastAPI
 
 from app.core.database import engine, Base
 from app.services.graph_engine import MultiCloudGraphEngine
-from app.services.risk_engine import HawkesRiskEngine
+from app.services.risk_engine import RiskEngine
 from app.services.ml_inference import ParallelMLEngine
 from app.services.xai_engine import FaithfulnessGatedXAI
 from app.services.db_flusher import risk_flush_ticker
@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
 
     # 3. Instantiate the stateful engines ONCE and share them.
     state_matrix["graph_engine"] = MultiCloudGraphEngine()
-    state_matrix["risk_engine"] = HawkesRiskEngine()
+    state_matrix["risk_engine"] = RiskEngine()
     # These two read models out of state_matrix; build once, reuse per event
     # (previously they were rebuilt on every single log — rebuilding the SHAP
     # TreeExplainer and Ollama client each time).
