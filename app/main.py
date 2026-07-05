@@ -2,7 +2,8 @@
 """
 CloudSentinel-XAI — FastAPI application entrypoint.
 
-Lifespan responsibilities:
+Lifespan responsibilities (all previously commented out, which is why the
+service could not run end to end):
 
   1. Build the shared, process-wide `state_matrix` that every request-time
      engine reads from. Engines (graph, risk, ML, XAI) are instantiated
@@ -171,8 +172,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="CloudSentinel-XAI",
+    version="2.0.0",
     lifespan=lifespan,
 )
+
+# Expose the REAL pipeline metrics for Prometheus to scrape at /metrics.
+# These are the same metric names grafana.json already queries, updated with
+# genuine detector output from the ingest pipeline (not simulated values).
+from prometheus_client import make_asgi_app  # noqa: E402
+app.mount("/metrics", make_asgi_app())
 
 
 @app.get("/health")
