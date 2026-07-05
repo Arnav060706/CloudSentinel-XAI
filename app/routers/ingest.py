@@ -34,6 +34,8 @@ import app.main as main_core
 from app.parser_normalizer.src.schema import UnifiedLogModel
 from app.core.database import XAIAlert, AsyncSessionLocal
 from app.services.db_flusher import pending_risk_updates
+from app.services import metrics_exporter
+from app.services.loki_exporter import push_narrative_to_loki
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +158,14 @@ async def process_log_through_engine(log_data: dict):
         # -- Step 1: Parallel ML inference (or neutral defaults in bypass) --
         scored_log = await ml_engine.execute_parallel_inference(log_data)
 
+        # Prometheus: every event processed + latest per-engine risk gauges.
+        metrics_exporter.record_event_processed()
+        metrics_exporter.record_ml_scores(
+            cloud_provider=scored_log.get("source_cloud", "UNKNOWN"),
+            anomaly_score=scored_log.get("anomaly_score", 0.0),
+            phase_confidence=scored_log.get("phase_confidence", 0.0),
+        )
+
         # -- Step 2: Identity stitching + lifetime cross-cloud tracking -----
         # New graph engine returns a 5-tuple; lifetime_clouds is what makes
         # cross-cloud detection pace-independent.
@@ -171,6 +181,13 @@ async def process_log_through_engine(log_data: dict):
             lifetime_clouds=lifetime_clouds,
         )
 
+        # Prometheus: trust score / risk intensity / cloud span / criticals.
+        metrics_exporter.record_risk_result(
+            user_identity=scored_log.get("principal", entity_id),
+            cloud_provider=scored_log.get("source_cloud", "UNKNOWN"),
+            risk_result=risk_result,
+        )
+
         # -- Step 4: Faithfulness gate + LLM narrative on critical alerts ---
         if risk_result.get("is_critical", False):
             logger.warning(
@@ -181,6 +198,25 @@ async def process_log_through_engine(log_data: dict):
             passed_gate, narrative, generation_ok = await xai_engine.generate_forensic_narrative(
                 scored_log, risk_result
             )
+
+            # Push a REAL log line to Loki for the dashboard's logs panel.
+            # If the LLM produced a narrative, stream that; otherwise stream a
+            # structured summary of the actual finding (still real, not faked).
+            loki_line = narrative if (passed_gate and generation_ok) else (
+                f"phase={scored_log.get('predicted_phase', 'Unknown')} "
+                f"dominant_signal={risk_result.get('dominant_signal')} "
+                f"clouds={risk_result.get('active_clouds')} "
+                f"scaled_score={risk_result.get('scaled_score')} "
+                f"(narrative unavailable: gate={passed_gate}, llm_ok={generation_ok})"
+            )
+            await push_narrative_to_loki(
+                entity_id=entity_id,
+                cloud_provider=scored_log.get("source_cloud", "UNKNOWN"),
+                action=scored_log.get("action", "Unknown"),
+                risk_score=risk_result.get("scaled_score"),
+                narrative_text=loki_line,
+            )
+
             # Only persist a real, successfully generated narrative to the
             # permanent ledger. A failed/gated generation is NOT written as
             # if it were a forensic finding (previous bug).
