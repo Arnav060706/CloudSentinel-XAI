@@ -1,156 +1,215 @@
 # app/routers/ingest.py
 """
 Telemetry Ingestion Pipeline Router
-==================================
+===================================
 
-Interceptors incoming multi-cloud streaming logs from collectors or simulation 
-harnesses (e.g., Stratus Red Team) and orchestrates the core analytical pipeline:
+Two ingestion surfaces:
 
-    1. Parallel ML Inference (Isolation Forest Anomaly + XGBoost ATT&CK Phase)
-    2. Identity Stitching & Graph Stateful Tracking (Sliding Window Management)
-    3. Hawkes Self-Exciting Point Process Evaluation (Dynamic Risk Intensity)
-    4. Write-Coalescing Buffer Queuing (Asynchronous SQLite/Postgres Storage)
+  POST /api/v1/ingest       — accepts ALREADY-NORMALIZED UnifiedLogModel
+                              records (the original contract).
+  POST /api/v1/ingest/raw   — accepts RAW multi-cloud provider logs (AWS
+                              CloudTrail / Azure / GCP JSON) and runs them
+                              through ParserPipeline first. This is what
+                              makes the service genuinely end-to-end with
+                              the mock_data you already have.
 
-Design Pattern
---------------
-Returns an immediate HTTP 202 Accepted response to the upstream broker/client.
-The entire compute-intensive pipeline is safely offloaded to FastAPI's 
-BackgroundTasks to maintain extreme ingestion throughput.
+Both hand each normalized event to the same background analytical chain:
+
+    1. Parallel ML inference (Isolation Forest anomaly + XGBoost phase)
+    2. Identity stitching & lifetime cross-cloud tracking (graph engine)
+    3. Hawkes self-exciting intensity, driven by the entity's LIFETIME
+       cloud footprint (pace-independent cross-cloud detection)
+    4. Faithfulness-gated LLM narrative on critical alerts
+    5. Write-coalesced risk-state persistence
+
+Returns 202 immediately and offloads compute to BackgroundTasks.
 """
 
 import logging
 from typing import List
+
 from fastapi import APIRouter, HTTPException, BackgroundTasks, status
 
 import app.main as main_core
 from app.parser_normalizer.src.schema import UnifiedLogModel
-from app.services.ml_inference import ParallelMLEngine
+from app.core.database import XAIAlert, AsyncSessionLocal
 from app.services.db_flusher import pending_risk_updates
-
-from app.services.xai_engine import FaithfulnessGatedXAI
-from app.core.database import XAIAlert
-from sqlalchemy.dialects.sqlite import insert
-from app.core.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Telemetry Ingestion Pipeline"])
 
+# ParserPipeline is only needed for the raw endpoint; import lazily so a
+# missing GeoLite DB / optional dep can't take down the whole router import.
+_parser_pipeline = None
+
+
+def _get_parser_pipeline():
+    global _parser_pipeline
+    if _parser_pipeline is None:
+        from app.parser_normalizer.src.pipeline import ParserPipeline
+        _parser_pipeline = ParserPipeline()
+    return _parser_pipeline
+
+
+def _engines_ready() -> bool:
+    sm = getattr(main_core, "state_matrix", {})
+    return "graph_engine" in sm and "risk_engine" in sm
+
 
 @router.post("/ingest", status_code=status.HTTP_202_ACCEPTED)
 async def ingest_multi_cloud_stream(
-    payload: List[UnifiedLogModel], 
-    background_tasks: BackgroundTasks
+    payload: List[UnifiedLogModel],
+    background_tasks: BackgroundTasks,
 ):
-    """
-    Ingestion interceptor mapping incoming cross-cloud logs directly into the
-    asynchronous background analytics engine.
-    """
+    """Ingest already-normalized cross-cloud logs."""
     if not payload:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="Empty telemetry payload array."
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty telemetry payload array.",
         )
-    
-    # Verify the core engines are correctly loaded in the global application context
-    if "graph_engine" not in main_core.state_matrix or "risk_engine" not in main_core.state_matrix:
+
+    if not _engines_ready():
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail="System State Initialization Engine Failure: Analytics modules not loaded."
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analytics engines not initialized yet.",
         )
-        
+
     for log in payload:
-        # Export the Pydantic data model cleanly into an operational dictionary
         log_dict = log.model_dump()
-        
-        # Offload the execution chain to background worker threads.
-        # Since process_log_through_engine is an async def, FastAPI schedules it
-        # optimally on the existing ASGI event loop.
+        # Pydantic gives us datetime / IPvAnyAddress objects; the engines
+        # expect plain strings. Normalize the couple of fields they touch.
+        _stringify_engine_fields(log_dict)
         background_tasks.add_task(process_log_through_engine, log_dict)
-        
+
+    return {"status": "Telemetry Accepted", "records_processed": len(payload)}
+
+
+@router.post("/ingest/raw", status_code=status.HTTP_202_ACCEPTED)
+async def ingest_raw_multi_cloud_stream(
+    payload: List[dict],
+    background_tasks: BackgroundTasks,
+):
+    """Ingest RAW provider logs; normalize via ParserPipeline, then analyze."""
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty raw telemetry payload array.",
+        )
+
+    if not _engines_ready():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analytics engines not initialized yet.",
+        )
+
+    pipeline = _get_parser_pipeline()
+    accepted = 0
+    failed = 0
+    for raw_log in payload:
+        normalized = pipeline.process_log(raw_log)
+        if normalized is None:
+            failed += 1
+            continue
+        log_dict = normalized.model_dump()
+        _stringify_engine_fields(log_dict)
+        background_tasks.add_task(process_log_through_engine, log_dict)
+        accepted += 1
+
     return {
-        "status": "Telemetry Accepted", 
-        "records_processed": len(payload)
+        "status": "Telemetry Accepted",
+        "records_normalized": accepted,
+        "records_failed": failed,
     }
 
 
+def _stringify_engine_fields(log_dict: dict) -> None:
+    """
+    The graph + risk engines key off `principal`, `timestamp`, `source_ip`
+    and `source_cloud` as plain strings. Normalized records carry a
+    datetime timestamp, an IP object, and use `user_id` for the principal.
+    Bridge those here so both endpoints feed the engines a consistent shape.
+    """
+    # principal: the engines look for "principal"; normalized logs use user_id
+    if "principal" not in log_dict:
+        log_dict["principal"] = log_dict.get("user_id", "unknown_principal")
+    # timestamp -> ISO string
+    ts = log_dict.get("timestamp")
+    if ts is not None and not isinstance(ts, str):
+        log_dict["timestamp"] = ts.isoformat()
+    # source_ip -> str (or None)
+    ip = log_dict.get("source_ip")
+    if ip is not None and not isinstance(ip, str):
+        log_dict["source_ip"] = str(ip)
+
+
 async def process_log_through_engine(log_data: dict):
-    """
-    The background execution chain running our analytical layers in sequence.
-    """
+    """Background execution chain running the analytical layers in sequence."""
     entity_id = "unknown_principal"
     try:
-        # Extract global system engine references from the lifespan matrix
-        graph = main_core.state_matrix["graph_engine"]
-        hawkes_engine = main_core.state_matrix["risk_engine"]
-        
-        # ------------------------------------------------------------------ #
-        # Step 1: Parallel Model Evaluations (Isolation Forest / XGBoost)    #
-        # ------------------------------------------------------------------ #
-        # We perform ML inference first so that the event tuple is fully 
-        # enriched with anomaly_score and predicted_phase before being stored
-        # in the graph's sliding window history.
-        ml_engine = ParallelMLEngine(main_core.state_matrix)
+        sm = main_core.state_matrix
+        graph = sm["graph_engine"]
+        hawkes_engine = sm["risk_engine"]
+        ml_engine = sm["ml_engine"]          # shared singleton
+        xai_engine = sm["xai_engine"]        # shared singleton
+
+        # -- Step 1: Parallel ML inference (or neutral defaults in bypass) --
         scored_log = await ml_engine.execute_parallel_inference(log_data)
-        
-        # ------------------------------------------------------------------ #
-        # Step 2: Identity Stitching via Graph Layer                        #
-        # ------------------------------------------------------------------ #
-        # The graph engine maps correlates, and resolves aliases across cloud 
-        # fabrics, returning the unified canonical entity identifier.
-        entity_id, active_events, is_new = graph.process_event(scored_log)
-        
+
+        # -- Step 2: Identity stitching + lifetime cross-cloud tracking -----
+        # New graph engine returns a 5-tuple; lifetime_clouds is what makes
+        # cross-cloud detection pace-independent.
+        entity_id, active_events, is_new, method, lifetime_clouds = graph.process_event(scored_log)
+
         if not active_events:
-            logger.debug(f"Event window empty or expired for entity: {entity_id}")
+            logger.debug("Empty risk window for entity %s (method=%s)", entity_id, method)
             return
 
-        # ------------------------------------------------------------------ #
-        # Step 3: Hawkes Process Intensity Scaling                           #
-        # ------------------------------------------------------------------ #
-        # Calculates the dynamic risk intensity and applies the cross-cloud 
-        # diversity multiplier based on the state of the active window.
-        risk_result = hawkes_engine.calculate_intensity(active_events)
-        
-        # ------------------------------------------------------------------ #
-        # Step 4: SHAP Faithfulness Verification & Llama Generation         #
-        # ------------------------------------------------------------------ #
+        # -- Step 3: Hawkes intensity, driven by LIFETIME cloud footprint ---
+        risk_result = hawkes_engine.calculate_intensity(
+            active_events,
+            lifetime_clouds=lifetime_clouds,
+        )
+
+        # -- Step 4: Faithfulness gate + LLM narrative on critical alerts ---
         if risk_result.get("is_critical", False):
             logger.warning(
-                f"[CRITICAL THREAT] Entity {entity_id} | Intensity: {risk_result['risk_intensity']}"
+                "[CRITICAL THREAT] entity=%s intensity=%s clouds=%s",
+                entity_id, risk_result.get("risk_intensity"),
+                risk_result.get("active_clouds"),
             )
-            
-            # Instantiate the Layer 5 Engine
-            xai_engine = FaithfulnessGatedXAI(main_core.state_matrix)
-            
-            # Execute the Faithfulness Gate and LLM generation asynchronously
-            passed_gate, narrative = await xai_engine.generate_forensic_narrative(scored_log, risk_result)
-            
-            # Log the narrative and push it to the persistent SQLite ledger
-            logger.info(f"Generated SOC Narrative: {narrative}")
-            
-            async with AsyncSessionLocal() as session:
-                try:
-                    alert = XAIAlert(
-                        entity_id=entity_id,
-                        predicted_phase=scored_log.get("predicted_phase", "Unknown"),
-                        dominant_shap_signal=risk_result.get("dominant_signal", "baseline_only"),
-                        llama_narrative=narrative
-                    )
-                    session.add(alert)
-                    await session.commit()
-                except Exception as db_err:
-                    logger.error(f"Failed to commit XAI narrative to ledger: {db_err}")
-        
-        # ------------------------------------------------------------------ #
-        # Step 5: Native Storage Exporters Pushing                           #
-        # ------------------------------------------------------------------ #
-        # Non-blocking O(1) memory write. The background flusher ticker will 
-        # batch and flush this state to SQLite every 3 seconds.
+            passed_gate, narrative, generation_ok = await xai_engine.generate_forensic_narrative(
+                scored_log, risk_result
+            )
+            # Only persist a real, successfully generated narrative to the
+            # permanent ledger. A failed/gated generation is NOT written as
+            # if it were a forensic finding (previous bug).
+            if passed_gate and generation_ok:
+                logger.info("SOC narrative for %s: %s", entity_id, narrative)
+                async with AsyncSessionLocal() as session:
+                    try:
+                        alert = XAIAlert(
+                            entity_id=entity_id,
+                            predicted_phase=scored_log.get("predicted_phase", "Unknown"),
+                            dominant_shap_signal=risk_result.get("dominant_signal", "baseline_only"),
+                            llama_narrative=narrative,
+                        )
+                        session.add(alert)
+                        await session.commit()
+                    except Exception as db_err:
+                        logger.error("Failed to commit XAI narrative: %s", db_err)
+                        await session.rollback()
+            else:
+                logger.info(
+                    "Narrative not persisted for %s (passed_gate=%s, generation_ok=%s): %s",
+                    entity_id, passed_gate, generation_ok, narrative,
+                )
+
+        # -- Step 5: Write-coalesced risk-state buffer ----------------------
         pending_risk_updates[entity_id] = risk_result
 
     except Exception as pipeline_error:
         logger.error(
-            f"Fatal pipeline breakdown while processing log for entity '{entity_id}': "
-            f"{str(pipeline_error)}", 
-            exc_info=True
+            "Fatal pipeline breakdown for entity '%s': %s",
+            entity_id, pipeline_error, exc_info=True,
         )
