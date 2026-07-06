@@ -1,5 +1,5 @@
 from typing import Any, Dict
-from src.normalizer import normalize_severity_from_score, normalize_timestamp
+from app.parser_normalizer.src.normalizer import normalize_severity_from_score, normalize_timestamp
 
 class GCPCloudAuditParser:
     def parse(self, raw_log: Dict[str, Any]) -> Dict[str, Any]:

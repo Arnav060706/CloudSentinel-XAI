@@ -1,6 +1,6 @@
 import json
-from src.pipeline import ParserPipeline
-from src.feature_extractor import MLFeatureExtractor
+from app.parser_normalizer.src.pipeline import ParserPipeline
+from app.parser_normalizer.src.feature_extractor import MLFeatureExtractor
 
 def load_json(filepath):
     """Safely load JSON logs."""

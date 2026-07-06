@@ -1,12 +1,12 @@
 import logging
 import os
 from pydantic import ValidationError
-from src.schema import UnifiedLogModel
-from src.parsers.aws_parser import AWSCloudTrailParser
-from src.parsers.azure_parser import AzureActivityParser
-from src.parsers.gcp_parser import GCPCloudAuditParser
-from src.metrics import LOGS_RECEIVED, LOGS_NORMALIZED, LOGS_FAILED, PROCESS_TIME
-from src import enrichment
+from app.parser_normalizer.src.schema import UnifiedLogModel
+from app.parser_normalizer.src.parsers.aws_parser import AWSCloudTrailParser
+from app.parser_normalizer.src.parsers.azure_parser import AzureActivityParser
+from app.parser_normalizer.src.parsers.gcp_parser import GCPCloudAuditParser
+from app.parser_normalizer.src.metrics import LOGS_RECEIVED, LOGS_NORMALIZED, LOGS_FAILED, PROCESS_TIME
+from app.parser_normalizer.src import enrichment
 
 # Optional reference data for IP reputation / geo lookups. Missing files are
 # handled gracefully (fields fall back to "Unknown") - see enrichment.py.

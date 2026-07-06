@@ -1,4 +1,4 @@
-from src.normalizer import normalize_timestamp, normalize_severity_from_score
+from app.parser_normalizer.src.normalizer import normalize_timestamp, normalize_severity_from_score
 from typing import Any
 
 class AzureActivityParser:
