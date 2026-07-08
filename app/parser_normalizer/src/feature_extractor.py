@@ -214,7 +214,13 @@ class MLFeatureExtractor:
         columns_to_drop = [
             'source_ip', 'destination_ip', 'resource', 'event_type', 'status', 'user_agent',
             'failed_actions_5m', 'total_actions_5m', 'ip_num', 'resource_num', 
-            'is_read_action', 'is_write_action', 'is_privileged', '_one'
+            'is_read_action', 'is_write_action', 'is_privileged', '_one',
+            # Non-numeric bookkeeping columns that must NOT reach the models:
+            # raw_log is the original nested provider JSON, and timestamp is a
+            # datetime. Both crash sklearn/XGBoost at fit/predict time if left
+            # in X. (The engineered temporal features already capture the time
+            # signal, so the raw datetime is not needed in X.)
+            'raw_log', 'timestamp',
         ]
         df = df.drop(columns=[col for col in columns_to_drop if col in df.columns])
 
