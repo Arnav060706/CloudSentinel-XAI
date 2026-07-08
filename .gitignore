@@ -16,3 +16,8 @@ loki-storage/
 *.db-journal
 #csv 
 *.csv
+
+# SQLite temporary files
+*.db-shm
+*.db-wal
+
