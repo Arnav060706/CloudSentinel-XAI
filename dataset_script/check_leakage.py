@@ -10,10 +10,12 @@ def actor_of(rec):
     if "protoPayload" in rec: return rec["protoPayload"]["authenticationInfo"]["principalEmail"].split("@")[0]
 
 benign_users=set(); attack_users=set()
-for f in glob.glob("out/*_benign*.json"):   # train + holdout benign
+for f in (
+    glob.glob("dataset/raw/train/*_benign.json")
+    + glob.glob("dataset/raw/holdout/*_benign_holdout.json")): # train + holdout benign
     for r in json.load(open(f)): benign_users.add(actor_of(r))
 # attack files contain BOTH attack steps and benign noise; use the label csv for truth
-rows=list(csv.DictReader(open("out/attack_labels.csv")))
+rows = list(csv.DictReader(open("dataset/labels/ground_truth_labels.csv")))
 for r in rows:
     (attack_users if r["anomaly_flag"]=="True" else benign_users).add(r["actor"])
 

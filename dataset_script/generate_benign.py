@@ -96,7 +96,7 @@ def main():
     ap.add_argument("--out", default="./out")
     args = ap.parse_args()
     env = Environment(seed=args.seed, n_users=args.n_users)
-    em.reset_ids(); os.makedirs(args.out, exist_ok=True)
+    em.reset_ids(); em.set_run_tag(args.split); os.makedirs(args.out, exist_ok=True)
     day0 = dt.datetime(2026, 6, 1)
 
     aws, az, gcp = [], [], []

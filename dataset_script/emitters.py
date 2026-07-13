@@ -12,12 +12,24 @@ from env_profile import (TENANT_ID, CORP_DOMAIN, GCP_PROJECT, AWS_REGIONS,
                          ml_label)
 
 _counter = {"n": 0}
+_run_tag = {"tag": ""}
+
 def _eid(prefix):
     _counter["n"] += 1
-    return f"{prefix}-{_counter['n']:05d}"
+    tag = f"-{_run_tag['tag']}" if _run_tag["tag"] else ""
+    return f"{prefix}{tag}-{_counter['n']:05d}"
 
 def reset_ids():
     _counter["n"] = 0
+
+def set_run_tag(tag):
+    """Tag every subsequent event ID with a short source label (e.g. 'train',
+    'holdout', 'atk-fast', 'atk-slow') so IDs stay globally unique once the
+    four separately-generated sources are merged. Each generator script runs
+    in its own process and would otherwise restart its ID counter from 1,
+    causing collisions after the merge (e.g. two unrelated events both named
+    evt-aws-00001)."""
+    _run_tag["tag"] = tag
 
 # --------------------------------------------------------------------- AWS
 def aws_event(*, ts, event_name, user_name, account_id, ip, ua,

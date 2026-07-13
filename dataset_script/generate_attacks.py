@@ -104,21 +104,36 @@ def main():
     ap.add_argument("--repeats", type=int, default=1,
                     help="times to run each scenario (each on a fresh random victim)")
     ap.add_argument("--out", default="./out")
+    ap.add_argument("--days", type=int, default=21,
+                    help="length of the benign observation window (MUST match generate_benign.py --days) "
+                         "so attack instances stay inside the range where benign data also exists")
     args = ap.parse_args()
     env = Environment(seed=args.env_seed, n_users=args.n_users)
-    import random as _r; rng = _r.Random(args.seed); env.rng = rng; em.reset_ids(); os.makedirs(args.out, exist_ok=True)
-    day0 = dt.datetime(2026, 6, 15, 2, 0)
+    import random as _r; rng = _r.Random(args.seed); env.rng = rng
+    em.reset_ids(); em.set_run_tag(f"atk-{args.pace}"); os.makedirs(args.out, exist_ok=True)
+
+    # BENIGN_START must match generate_benign.py's day0 (2026-06-01). Attack chains
+    # start a few days in (so there's benign history before them) and must all
+    # finish before the observation window closes, or a model could "detect"
+    # attacks by date alone rather than by behavior.
+    BENIGN_START = dt.datetime(2026, 6, 1)
+    START_OFFSET_DAYS = 3
+    END_BUFFER_DAYS = 2
+    day0 = BENIGN_START + dt.timedelta(days=START_OFFSET_DAYS, hours=2)
 
     aws, az, gcp, rows = [], [], [], []
     pools = {"human_admin": env.admin_names, "human_user": env.human_names,
              "service_account": env.service_names}
+    n_instances = args.repeats * len(ALL_SCENARIOS)
+    available_days = max(args.days - START_OFFSET_DAYS - END_BUFFER_DAYS, 1)
+    step_days = available_days / max(n_instances, 1)
     slot = 0
     for _ in range(args.repeats):
         for scen in ALL_SCENARIOS:
             role = scen["victim_role"]
             actor = rng.choice(pools[role])                 # <-- random legit victim
             is_service = role == "service_account"
-            t = day0 + dt.timedelta(days=slot*2, hours=rng.randint(0,6)); slot += 1
+            t = day0 + dt.timedelta(days=slot*step_days, hours=rng.randint(0,6)); slot += 1
             # tag which split this victim belongs to (for the generalization experiment)
             victim_split = "holdout" if actor in env.holdout_users else "train"
             for s in scen["steps"]:

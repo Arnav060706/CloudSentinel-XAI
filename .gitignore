@@ -21,3 +21,6 @@ loki-storage/
 *.db-shm
 *.db-wal
 
+#datast
+**/dataset/
+

@@ -15,12 +15,12 @@ def aws_action(r): return r.get("eventName")
 def az_action(r):  return r.get("operationName")
 def gcp_action(r): return r.get("protoPayload",{}).get("methodName")
 
-real_aws = json.load(open("/mnt/user-data/uploads/aws_iam_logs.json"))
-real_az  = json.load(open("/mnt/user-data/uploads/azure_iam_logs.json"))
-real_gcp = json.load(open("/mnt/user-data/uploads/gcp_iam_logs.json"))
-syn_aws  = load(glob.glob("dataset/aws_*.json"))
-syn_az   = load(glob.glob("dataset/azure_*.json"))
-syn_gcp  = load(glob.glob("dataset/gcp_*.json"))
+real_aws = json.load(open("dataset/real/aws_iam_logs.json"))
+real_az  = json.load(open("dataset/real/azure_iam_logs.json"))
+real_gcp = json.load(open("dataset/real/gcp_iam_logs.json"))
+syn_aws = json.load(open("dataset/merged/aws_logs.json"))
+syn_az  = json.load(open("dataset/merged/azure_logs.json"))
+syn_gcp = json.load(open("dataset/merged/gcp_logs.json"))
 
 def pct_anom(logs): 
     a=sum(1 for r in logs if r.get("ml_labels",{}).get("anomaly_flag")); 
