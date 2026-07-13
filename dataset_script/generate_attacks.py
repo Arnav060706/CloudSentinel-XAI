@@ -40,14 +40,21 @@ def _emit(env, s, actor, is_service, ts, rows, aws, az, gcp, scen):
     rng = env.rng; infra = s["infra"]; ip = env.pick_ip(infra)
     lbl = ml_label(True, s["category"], s["severity"]); cloud = s["cloud"]
     upn = env.upn(actor); display = actor.replace(".", " ").replace("-", " ").title()
+    created = s.get("created")
     eid = None
     if cloud == "aws":
         ua = rng.choice(SUSPICIOUS_UAS) if infra in ("tor","hosting","foreign") else rng.choice(BROWSER_UAS)
+        # Real CloudTrail CreateUser/CreateAccessKey events carry the target
+        # identity in requestParameters. Without this, the backdoor account
+        # never appears anywhere in the log content (only in the note/label),
+        # so nothing in the raw event distinguishes the identity being created.
+        request_params = {"userName": created} if created else None
         rec = em.aws_event(ts=ts, event_name=s["action"], user_name=actor,
             account_id=AWS_ACCOUNTS[0], ip=ip, ua=ua, success=s["success"], mfa=False,
             principal_type="AssumedRole" if is_service else "IAMUser",
             error_code=None if s["success"] else "FailedAuthentication",
-            read_only=s["action"].startswith(("List","Get")), labels=lbl)
+            read_only=s["action"].startswith(("List","Get")), labels=lbl,
+            request_params=request_params)
         aws.append(rec); eid = rec["eventID"]
     elif cloud == "azure":
         rec = em.azure_event(ts=ts, operation=s["action"], upn=upn, display_name=display,
@@ -59,14 +66,22 @@ def _emit(env, s, actor, is_service, ts, rows, aws, az, gcp, scen):
         pe = env.gcp_principal(actor, is_service)
         ua = rng.choice(SCRIPT_UAS) if infra in ("tor","hosting","foreign") else rng.choice(SDK_UAS_GCP)
         sev = "ERROR" if not s["success"] else ("WARNING" if s["severity"]>=0.6 else "NOTICE")
+        request = None
+        if created:
+            if "CreateServiceAccountKey" in s["action"]:
+                request = {"name": f"projects/{GCP_PROJECT}/serviceAccounts/"
+                                    f"{created}@{GCP_PROJECT}.iam.gserviceaccount.com"}
+            elif "CreateServiceAccount" in s["action"]:
+                request = {"accountId": created}
         rec = em.gcp_event(ts=ts, method=s["action"], principal_email=pe, ip=ip, ua=ua,
-            success=s["success"], severity=sev, labels=lbl)
+            success=s["success"], severity=sev, labels=lbl, request=request)
         gcp.append(rec); eid = rec["insertId"]
     rows.append({"event_id": eid, "scenario": scen, "actor": actor, "cloud": cloud,
         "action": s["action"], "timestamp": ts, "anomaly_flag": True,
         "threat_category": s["category"], "severity_score": s["severity"],
         "tactic": s["tactic"], "technique_id": s["technique_id"],
-        "technique_name": s["technique_name"], "infra": infra, "note": s["note"]})
+        "technique_name": s["technique_name"], "infra": infra, "note": s["note"],
+        "created": created or ""})
 
 def _noise(env, day0, rng, n, aws, az, gcp, rows):
     # benign events using RANDOM legitimate users (incl. victims) -> no name/label link
@@ -144,7 +159,9 @@ def main():
 
     n_atk = sum(1 for r in rows if r["anomaly_flag"])
     _noise(env, day0, rng, int(n_atk*args.noise_ratio), aws, az, gcp, rows)
-    for r in rows: r.setdefault("victim_split", "")
+    for r in rows:
+        r.setdefault("victim_split", "")
+        r.setdefault("created", "")
 
     for st in (aws, az, gcp):
         st.sort(key=lambda r: r.get("eventTime") or r.get("time") or r.get("timestamp"))

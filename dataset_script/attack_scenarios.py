@@ -39,12 +39,17 @@ T = {
 
 # infra tags: office | home | tor | hosting | foreign
 def step(cloud, action, tech, sev, cat, infra="foreign", success=True,
-         principal=None, note=""):
+         principal=None, note="", created=None):
+    """created: identity name this step creates (CreateUser/CreateServiceAccount/
+    CreateAccessKey etc.), if any. Threaded into requestParameters by
+    generate_attacks.py so the created identity actually appears in the log
+    content (real CloudTrail/Audit events carry this), and into the ground-
+    truth CSV so check_leakage.py can verify it's correctly attack-exclusive."""
     tactic, tid, tname = T[tech]
     return {"cloud": cloud, "action": action, "tactic": tactic,
             "technique_id": tid, "technique_name": tname, "severity": sev,
             "category": cat, "infra": infra, "success": success,
-            "principal": principal, "note": note}
+            "principal": principal, "note": note, "created": created}
 
 # --------------------------------------------------------------------------
 # SCENARIO 1 — Classic cross-cloud credential-theft APT (AWS -> Azure -> GCP)
@@ -61,8 +66,9 @@ SCENARIO_APT_CROSS_CLOUD = {
         step("aws", "ListUsers", "account_disc", 0.55, "Reconnaissance", "tor"),
         step("aws", "ListRoles", "perm_groups_disc", 0.55, "Reconnaissance", "tor"),
         step("aws", "CreateUser", "create_account", 0.80, "CredentialCreation", "tor",
-             note="creates backdoor user bd-svc-01"),
-        step("aws", "CreateAccessKey", "add_credentials", 0.83, "CredentialCreation", "tor"),
+             note="creates backdoor user bd-svc-01", created="bd-svc-01"),
+        step("aws", "CreateAccessKey", "add_credentials", 0.83, "CredentialCreation", "tor",
+             created="bd-svc-01"),
         step("aws", "AttachUserPolicy", "modify_policy", 0.89, "PrivilegeEscalation", "tor"),
         step("aws", "DeactivateMFADevice", "modify_auth", 0.91, "DefenseEvasion", "tor"),
         step("azure", "Sign-in activity", "cloud_accounts", 0.84, "SuspiciousLogin", "foreign"),
@@ -70,9 +76,10 @@ SCENARIO_APT_CROSS_CLOUD = {
         step("azure", "Update conditional access policy", "modify_auth", 0.88, "DefenseEvasion", "foreign"),
         step("gcp", "google.login.LoginService.loginSuccess", "cloud_accounts", 0.82, "SuspiciousLogin", "hosting"),
         step("gcp", "google.iam.admin.v1.CreateServiceAccount", "create_account", 0.86,
-             "SuspiciousServiceAccountCreation", "hosting", note="exfil-agent svc"),
+             "SuspiciousServiceAccountCreation", "hosting", note="creates backdoor service account exfil-agent-svc",
+             created="exfil-agent-svc"),
         step("gcp", "google.iam.admin.v1.CreateServiceAccountKey", "add_credentials", 0.88,
-             "CredentialCreation", "hosting"),
+             "CredentialCreation", "hosting", created="exfil-agent-svc"),
         step("gcp", "SetIamPolicy", "modify_policy", 0.92, "PrivilegeEscalation", "hosting"),
         step("gcp", "SetIamPolicy", "exfil", 0.95, "UnauthorizedAccessAttempt", "hosting",
              note="grants external principal access to data bucket"),

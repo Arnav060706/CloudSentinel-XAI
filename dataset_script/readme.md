@@ -72,7 +72,12 @@ python validate_realism.py    # fidelity vs the real company logs
 ## Ground-truth label columns
 `event_id, scenario, actor, cloud, action, timestamp, anomaly_flag,
 threat_category, severity_score, tactic, technique_id, technique_name, infra,
-note, victim_split`  (`victim_split` = train|holdout for the generalization split)
+note, victim_split, created`  (`victim_split` = train|holdout for the
+generalization split; `created` = identity name this step creates, e.g.
+`bd-svc-01`, empty for steps that don't create an identity — also written into
+the event's `requestParameters`/`request` so it's real log content, not just a
+label, and read back by `check_leakage.py` to verify it's correctly
+attack-exclusive)
 
 ## Reproducibility
 `--seed` (attack randomness) and `--env-seed` (population identity) are both

@@ -7,7 +7,8 @@ from collections import defaultdict
 def actor_of(rec):
     if "userIdentity" in rec: return rec["userIdentity"].get("userName")
     if "properties" in rec: return rec["properties"].get("userPrincipalName","").split("@")[0]
-    if "protoPayload" in rec: return rec["protoPayload"]["authenticationInfo"]["principalEmail"].split("@")[0]
+    if "protoPayload" in rec:
+        return rec["protoPayload"].get("authenticationInfo", {}).get("principalEmail", "").split("@")[0]
 
 benign_users=set(); attack_users=set()
 for f in (
@@ -19,17 +20,25 @@ rows = list(csv.DictReader(open("dataset/labels/ground_truth_labels.csv")))
 for r in rows:
     (attack_users if r["anomaly_flag"]=="True" else benign_users).add(r["actor"])
 
+# Identities the attacker creates mid-chain (e.g. bd-svc-01) are read from the
+# scenario data itself via the "created" column (attack_scenarios.py ->
+# generate_attacks.py), not a hand-maintained guess, so this stays in sync
+# automatically. They never appear as an "actor" (the caller) — only as the
+# target of a CreateUser/CreateServiceAccount step — so they're never picked
+# up by actor_of() and must be added to attack_users explicitly here.
+created = {r["created"] for r in rows if r.get("created")}
+attack_users |= created
+
 attack_only = attack_users - benign_users
 benign_only_in_attackfile = benign_users - attack_users  # fine, just means not attacked
 
-# attacker-created accounts are allowed to be attack-only
-created = {"bd-svc-01"}  # names attackers create mid-chain
-suspicious_attack_only = {u for u in attack_only if u and not (u.startswith("bd-") or u in created)}
+suspicious_attack_only = {u for u in attack_only if u and u not in created}
 
 print(f"users seen benign: {len(benign_users)}")
-print(f"users seen in attacks (as victim): {len(attack_users)}")
+print(f"users seen in attacks (as victim or attacker-created): {len(attack_users)}")
+print(f"attacker-created identities (from scenario data): {sorted(created)}")
 print(f"attack-only identities: {sorted(x for x in attack_only if x)}")
-print(f"  -> attacker-CREATED (allowed attack-only): {sorted(x for x in attack_only if x and (x.startswith('bd-') or x in created))}")
+print(f"  -> attacker-CREATED (allowed attack-only): {sorted(x for x in attack_only if x and x in created)}")
 print(f"  -> LEAKY established-user attack-only (should be EMPTY): {sorted(suspicious_attack_only)}")
 overlap = attack_users & benign_users
 print(f"identities appearing in BOTH benign and attack: {len(overlap)}  (this is what kills the leak)")
