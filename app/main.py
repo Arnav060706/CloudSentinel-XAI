@@ -46,11 +46,16 @@ state_matrix: dict = {}
 background_tasks_refs: dict = {}
 
 # Where trained artifacts are expected. All optional — absence => bypass mode.
+# Both are full bundles (model + fitted label_encoders + feature_columns, and
+# for XGBoost also class_names) produced by models/train_isolation_forest.py
+# and models/train_xgboost.py -- NOT the separate isolation_forest.pkl /
+# xgboost_model.json / feature_encoder.pkl / class_names.json files an
+# earlier version of this loader expected (those were never actually
+# produced by anything; see app/services/ml_inference.py's module docstring
+# for why one shared feature_encoder can't correctly serve both models here).
 MODELS_DIR = os.environ.get("CLOUDSENTINEL_MODELS_DIR", "models")
-ISO_FOREST_PATH = os.path.join(MODELS_DIR, "isolation_forest.pkl")
-XGBOOST_PATH = os.path.join(MODELS_DIR, "xgboost_model.json")
-FEATURE_ENCODER_PATH = os.path.join(MODELS_DIR, "feature_encoder.pkl")
-CLASS_NAMES_PATH = os.path.join(MODELS_DIR, "class_names.json")
+ISO_FOREST_BUNDLE_PATH = os.path.join(MODELS_DIR, "iso_forest.pkl")
+XGBOOST_BUNDLE_PATH = os.path.join(MODELS_DIR, "xgboost_classifier.pkl")
 
 
 def _load_ml_artifacts(sm: dict) -> None:
@@ -59,45 +64,21 @@ def _load_ml_artifacts(sm: dict) -> None:
     is independent and optional; any missing/unloadable artifact leaves its
     slot as None and the ML engine falls back to bypass behaviour.
     """
-    # Isolation Forest (pickle)
-    if os.path.exists(ISO_FOREST_PATH):
+    if os.path.exists(ISO_FOREST_BUNDLE_PATH):
         try:
-            with open(ISO_FOREST_PATH, "rb") as f:
-                sm["iso_forest"] = pickle.load(f)
-            logger.info("Loaded Isolation Forest from %s", ISO_FOREST_PATH)
+            with open(ISO_FOREST_BUNDLE_PATH, "rb") as f:
+                sm["iso_forest_bundle"] = pickle.load(f)
+            logger.info("Loaded Isolation Forest bundle from %s", ISO_FOREST_BUNDLE_PATH)
         except Exception as e:
-            logger.error("Failed to load Isolation Forest: %s", e)
+            logger.error("Failed to load Isolation Forest bundle: %s", e)
 
-    # XGBoost (native JSON)
-    if os.path.exists(XGBOOST_PATH):
+    if os.path.exists(XGBOOST_BUNDLE_PATH):
         try:
-            import xgboost as xgb
-            clf = xgb.XGBClassifier()
-            clf.load_model(XGBOOST_PATH)
-            sm["xgboost"] = clf
-            logger.info("Loaded XGBoost from %s", XGBOOST_PATH)
+            with open(XGBOOST_BUNDLE_PATH, "rb") as f:
+                sm["xgboost_bundle"] = pickle.load(f)
+            logger.info("Loaded XGBoost bundle from %s", XGBOOST_BUNDLE_PATH)
         except Exception as e:
-            logger.error("Failed to load XGBoost: %s", e)
-
-    # Feature encoder (pickle) — the fitted encoder used at TRAIN time.
-    if os.path.exists(FEATURE_ENCODER_PATH):
-        try:
-            with open(FEATURE_ENCODER_PATH, "rb") as f:
-                sm["feature_encoder"] = pickle.load(f)
-            logger.info("Loaded feature encoder from %s", FEATURE_ENCODER_PATH)
-        except Exception as e:
-            logger.error("Failed to load feature encoder: %s", e)
-
-    # Class-index -> phase-name mapping (JSON list), so predicted_phase is a
-    # human-readable ATT&CK phase rather than an integer class id.
-    if os.path.exists(CLASS_NAMES_PATH):
-        try:
-            import json
-            with open(CLASS_NAMES_PATH) as f:
-                sm["class_names"] = json.load(f)
-            logger.info("Loaded class names from %s", CLASS_NAMES_PATH)
-        except Exception as e:
-            logger.error("Failed to load class names: %s", e)
+            logger.error("Failed to load XGBoost bundle: %s", e)
 
 
 @asynccontextmanager
@@ -112,13 +93,14 @@ async def lifespan(app: FastAPI):
 
     # 2. Load ML artifacts (optional — bypass mode if absent).
     _load_ml_artifacts(state_matrix)
-    bypass = not (state_matrix.get("iso_forest") and state_matrix.get("xgboost"))
+    bypass = not (state_matrix.get("iso_forest_bundle") and state_matrix.get("xgboost_bundle"))
     if bypass:
         logger.warning(
-            "Running in ML BYPASS mode: no trained isolation_forest/xgboost "
-            "found under '%s'. Inference returns neutral defaults; the rest "
-            "of the pipeline still runs end to end. Train + drop models in to "
-            "enable real scoring.", MODELS_DIR,
+            "Running in ML BYPASS mode: no trained iso_forest.pkl/"
+            "xgboost_classifier.pkl bundles found under '%s'. Inference "
+            "returns neutral defaults; the rest of the pipeline still runs "
+            "end to end. Run models/train_isolation_forest.py and "
+            "models/train_xgboost.py to enable real scoring.", MODELS_DIR,
         )
 
     # 3. Instantiate the stateful engines ONCE and share them.

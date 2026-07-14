@@ -90,7 +90,16 @@ class RiskEngine:
         Small constant risk of a quiet environment. Default 0.05.
     half_life_seconds : float
         An event's weight halves every this many seconds. Smaller = risk fades
-        faster. Default 30.0 (weight halves every 30s).
+        faster. Default 1800.0 (30 min). Was 30s, which only fit "fast"-paced
+        attacks (generate_attacks.py's PACE table: 5-90s gaps): at a 600s
+        "slow"-pace gap, a 30s half-life decays the previous step's
+        contribution by 0.5**20 (~1e-6) -- effectively zero, making the
+        decayed-sum term blind to anything but the single most recent event
+        for any campaign paced slower than ~2 minutes. At 1800s, a 90s
+        fast-pace gap still barely decays (~97% weight retained) while a
+        5400s (1.5h) slow-pace gap retains ~12.5% -- meaningful, not zero.
+        Benign traffic is unaffected either way (events average ~18h apart
+        in this dataset, decaying to ~0 under both settings).
     per_cloud_multiplier : float
         Risk is multiplied by this for each NEW cloud a (human) identity
         crosses beyond its normal set. Default 3.0
@@ -102,6 +111,15 @@ class RiskEngine:
         Scaled score (0..1) at or above which is_critical is True.
         Default 0.75 (i.e. raw risk >= 3.0). Set from benign data with
         recalibrate_threshold().
+    recalibration_percentile : float
+        Default benign percentile used by recalibrate_threshold() in the LIVE
+        path (where no labels exist to sweep against). Default 95.0, NOT 99.0:
+        p99 of only ~2400 benign samples is set by its ~24 most extreme
+        outliers, is high-variance, and was observed landing ABOVE every attack
+        score despite a genuinely separating ranking (0 TP at ROC-AUC 0.68 --
+        see models/README.md's threshold-fragility finding). p95 is far more
+        stable. Where labels ARE available (offline eval), prefer sweeping via
+        scoring_utils.sweep_threshold() instead of any benign quantile.
     """
 
     _AUTOMATION_PRINCIPAL_TYPES: Set[str] = {
@@ -117,10 +135,11 @@ class RiskEngine:
     def __init__(
         self,
         baseline: float = 0.05,
-        half_life_seconds: float = 30.0,
+        half_life_seconds: float = 1800.0,
         per_cloud_multiplier: float = 3.0,
         automation_cloud_multiplier: float = 1.7,
         alert_threshold: float = 0.75,
+        recalibration_percentile: float = 95.0,
     ):
         if baseline < 0:
             raise ValueError("baseline must be non-negative")
@@ -130,12 +149,15 @@ class RiskEngine:
             raise ValueError("per_cloud_multiplier must be >= 1")
         if not (1 <= automation_cloud_multiplier <= per_cloud_multiplier):
             raise ValueError("automation_cloud_multiplier must be in [1, per_cloud_multiplier]")
+        if not (0 < recalibration_percentile <= 100):
+            raise ValueError("recalibration_percentile must be in (0, 100]")
 
         self.baseline = float(baseline)
         self.half_life = float(half_life_seconds)
         self.per_cloud_multiplier = float(per_cloud_multiplier)
         self.automation_cloud_multiplier = float(automation_cloud_multiplier)
         self.alert_threshold = float(alert_threshold)
+        self.recalibration_percentile = float(recalibration_percentile)
 
         # Learned "normal" cloud footprint per identity: entity_key -> set(clouds).
         self._entity_baselines: Dict[str, Set[str]] = {}
@@ -209,6 +231,14 @@ class RiskEngine:
             if age < 0:
                 age = 0.0  # future event (clock skew) counts as "now"
 
+            # SCORE SCALE (read before changing the signal): as of Phase 4 the
+            # live path (ml_inference.py) sets anomaly_score = XGBoost's
+            # 1 - P(Normal), bounded [0,1]. The Isolation Forest's
+            # 0.5 - decision_function() is the historical scale and is preserved
+            # separately as if_anomaly_score. Any calibrated alert_threshold is
+            # only valid for the scale it was calibrated against, so a future
+            # signal swap MUST trigger recalibration (Phase 2 sweeps/quantiles
+            # the threshold FROM the live scale, which is what makes the swap safe).
             anomaly = e.get("anomaly_score")
             if anomaly is None:
                 anomaly = e.get("phase_confidence", 0.1)
@@ -266,15 +296,23 @@ class RiskEngine:
         self._entity_baselines.setdefault(str(entity_id), set()).update(norm)
 
     def recalibrate_threshold(self, benign_risk_values: List[float],
-                              percentile: float = 99.0) -> float:
+                              percentile: Optional[float] = None) -> float:
         """
         Set alert_threshold from benign traffic: take the given percentile of
         the benign SCALED scores. Run known-benign data through the engine,
-        collect the risk_intensity values, and pass them here.
-        Returns the new alert_threshold.
+        collect the risk_intensity values, and pass them here. Returns the new
+        alert_threshold.
+
+        percentile defaults to self.recalibration_percentile (95.0, not 99.0 --
+        see the constructor docstring for why p99 proved too fragile at this
+        sample size). This is the LIVE-path calibration where no attack labels
+        exist; when you DO have labels (offline eval), sweep against them via
+        scoring_utils.sweep_threshold() rather than any benign quantile.
         """
         if not benign_risk_values:
             raise ValueError("benign_risk_values must be non-empty")
+        if percentile is None:
+            percentile = self.recalibration_percentile
         scaled = sorted((r / (r + 1.0)) for r in map(lambda v: _finite(v, 0.0), benign_risk_values))
         idx = min(int(len(scaled) * percentile / 100.0), len(scaled) - 1)
         self.alert_threshold = round(min(0.999, scaled[idx]), 4)
@@ -288,6 +326,7 @@ class RiskEngine:
             "per_cloud_multiplier": self.per_cloud_multiplier,
             "automation_cloud_multiplier": self.automation_cloud_multiplier,
             "alert_threshold": self.alert_threshold,
+            "recalibration_percentile": self.recalibration_percentile,
             "tracked_entities": len(self._entity_baselines),
         }
 

@@ -46,17 +46,33 @@ class MLFeatureExtractor:
         self.target_columns = ['severity', 'severity_score', 'threat_category', 'anomaly_flag', 'trust_score', 'risk_score']
 
     def extract_features(
-        self, 
-        unified_logs: List[dict], 
-        is_training: bool = True, 
+        self,
+        unified_logs: List[dict],
+        is_training: bool = True,
         export_csv: bool = False,
         output_path_X: str = "features_X.csv",
-        output_path_y: str = "targets_y.csv"
+        output_path_y: str = "targets_y.csv",
+        include_labeled_only_features: bool = False,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Converts a list of UnifiedLogModel dictionaries into an (X, y) tuple of Pandas DataFrames,
         strictly isolating target variables to prevent data leakage.
         Optionally exports the resulting matrices to CSV files.
+
+        include_labeled_only_features: False (default) preserves the exact
+        Isolation Forest training behavior -- geo_country, is_known_proxy_or_tor,
+        device_compliant_status, and is_internal_ip are dropped, because they
+        are zero-variance on benign-only training data (see inline comments
+        below for why each one specifically). Set True for supervised
+        training (e.g. XGBoost) on labeled attack data, where these same four
+        columns have real, confirmed variance (e.g. is_known_proxy_or_tor is
+        41 True / 328 False on Datasets/attacks_fast, not constant) and are
+        genuine signal, not dead weight. user_id, browser_type, and
+        is_new_ip_for_user stay dropped either way -- user_id for identity
+        leakage (arguably worse for a classifier trained on a small number of
+        distinct campaign instances), the other two because they're still
+        zero-variance / a generator artifact even on attack data (confirmed
+        empirically, not assumed -- see models/README.md).
         """
         if not unified_logs:
             return pd.DataFrame(), pd.DataFrame()
@@ -167,28 +183,37 @@ class MLFeatureExtractor:
               .apply(lambda x: x.rolling('5min').count())
         )
         df['error_rate_5m'] = (df['failed_actions_5m'] / df['total_actions_5m']).fillna(0.0)
-        df = df.reset_index(drop=True)
 
-        # Read vs Write Ratio (Reconnaissance detection)
+        # Read vs Write Ratio (Reconnaissance detection) — genuine trailing 1h
+        # window, matching the reads_1h/writes_1h naming below (previously an
+        # all-time .cumsum() since the start of the user's history: same
+        # all-time-vs-windowed bug as the velocity metrics above).
         df['is_read_action'] = df['action'].astype(str).str.contains('Get|List|Describe|Read', case=False).astype(int)
         df['is_write_action'] = (~df['is_read_action'].astype(bool)).astype(int)
-        
-        reads_1h = df.groupby('user_id')['is_read_action'].cumsum()
-        writes_1h = df.groupby('user_id')['is_write_action'].cumsum()
+
+        reads_1h = (
+            df.groupby('user_id', group_keys=False)['is_read_action']
+              .apply(lambda x: x.rolling('1h').sum())
+        )
+        writes_1h = (
+            df.groupby('user_id', group_keys=False)['is_write_action']
+              .apply(lambda x: x.rolling('1h').sum())
+        )
         df['read_vs_write_ratio'] = (reads_1h / writes_1h.replace(0, 1)).fillna(0.0)
+        df = df.reset_index(drop=True)
 
         # Scope & Escalation: Unique Resources and IPs accessed
-        df["unique_resources_accessed"] = (
-            df.groupby("user_id")["resource_num"]
-            .transform("nunique")
-            .fillna(1)
-        )
-
         # PREVIOUSLY: "_last_24h" implied a rolling 24h window but was
         # actually an all-time nunique()/cumsum() over the whole batch —
         # same all-time-vs-windowed bug as the velocity metrics above.
-        # Fixed to use a genuine trailing-24h time window.
+        # Fixed to use a genuine trailing-24h time window (also applied to
+        # unique_resources_accessed, which had the identical bug).
         df = df.set_index('timestamp', drop=False)
+        df["unique_resources_accessed"] = (
+            df.groupby("user_id", group_keys=False)["resource_num"]
+              .apply(lambda x: x.rolling('24h').apply(lambda w: pd.Series(w).nunique(), raw=True))
+              .fillna(1)
+        )
         df["unique_ips_last_24h"] = (
             df.groupby("user_id", group_keys=False)["ip_num"]
               .apply(lambda x: x.rolling('24h').apply(lambda w: pd.Series(w).nunique(), raw=True))
@@ -210,10 +235,11 @@ class MLFeatureExtractor:
         # ENCODING & TARGET ISOLATION
         # ==========================================
         
-        # Drop columns used for temporary math or raw strings too noisy for ML
+        # Drop columns used for temporary math or raw strings too noisy for ML.
+        # These are dropped UNCONDITIONALLY, regardless of include_labeled_only_features:
         columns_to_drop = [
             'source_ip', 'destination_ip', 'resource', 'event_type', 'status', 'user_agent',
-            'failed_actions_5m', 'total_actions_5m', 'ip_num', 'resource_num', 
+            'failed_actions_5m', 'total_actions_5m', 'ip_num', 'resource_num',
             'is_read_action', 'is_write_action', 'is_privileged', '_one',
             # Non-numeric bookkeeping columns that must NOT reach the models:
             # raw_log is the original nested provider JSON, and timestamp is a
@@ -221,7 +247,48 @@ class MLFeatureExtractor:
             # in X. (The engineered temporal features already capture the time
             # signal, so the raw datetime is not needed in X.)
             'raw_log', 'timestamp',
+            # Identity leakage, not a benign-only artifact -- stays dropped even
+            # for supervised training on labeled attack data. Arguably MORE
+            # important there: a classifier trained on a small number of
+            # distinct campaign instances could otherwise learn "this specific
+            # username = victim of scenario X" instead of genuine behavior.
+            'user_id',
+            # Zero variance on BOTH benign and attack data (confirmed
+            # empirically on Datasets/attacks_fast, not assumed): none of the
+            # synthetic UA strings, benign or malicious, literally contain
+            # "Chrome"/"Firefox"/"Safari". ua_family already captures the real
+            # tool distinction at higher resolution and does vary.
+            'browser_type',
+            # Data-generation artifact, not a real behavioral signal, on BOTH
+            # benign and attack data: source IPs (including the malicious
+            # tor/hosting/foreign pools) are drawn uniformly at random
+            # per-event with no per-user/per-attacker affinity (env_profile.py
+            # pick_benign_ip / pick_ip). Confirmed on attacks_fast: still 97.3%
+            # "new IP", i.e. still corrupted, not fixed by attack data.
+            'is_new_ip_for_user',
         ]
+
+        # These four are zero-variance on BENIGN-ONLY training data (see
+        # comments below for why each specifically), so they're dropped for
+        # the unsupervised Isolation Forest. But they have real, CONFIRMED
+        # variance on labeled attack data (e.g. is_known_proxy_or_tor is 41
+        # True / 328 False on Datasets/attacks_fast, not constant) -- kept in
+        # when include_labeled_only_features=True for supervised training.
+        if not include_labeled_only_features:
+            columns_to_drop += [
+                # Wired into the pipeline (enrichment.py) but every benign IP
+                # pool is a non-routable documentation range (env_profile.py),
+                # so these are always "Unknown"/False on benign-only data.
+                'geo_country', 'is_known_proxy_or_tor',
+                # Near-constant in the benign set (only NaN / "Compliant", no
+                # negative case ever appears) -> no training signal there.
+                'device_compliant_status',
+                # Every benign IP pool (corp/home/internal) falls in an
+                # IANA-reserved/private range by construction, so this is
+                # always 1 on benign-only data.
+                'is_internal_ip',
+            ]
+
         df = df.drop(columns=[col for col in columns_to_drop if col in df.columns])
 
         # 1. Isolate Target Variables (y) to prevent Data Leakage
@@ -236,9 +303,11 @@ class MLFeatureExtractor:
         X = df.drop(columns=y_cols)
 
         # 3. Label Encode ALL categorical strings in X
+        # (user_id, device_compliant_status, geo_country, is_known_proxy_or_tor
+        # are dropped above before reaching here; kept in this list so encoding
+        # resumes automatically if one of them is removed from columns_to_drop.)
         categorical_cols = [
             'source_cloud', 'action', 'user_id', 'device_compliant_status', 'browser_type', 'os_type', 'geo_country',
-            # Previously missing -> left as raw strings -> crashed IsolationForest/XGBoost at fit time.
             'account_type', 'principal_type', 'is_known_proxy_or_tor', 'ua_family', 'ua_version',
         ]
         

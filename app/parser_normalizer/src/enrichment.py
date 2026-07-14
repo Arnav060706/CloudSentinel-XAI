@@ -58,6 +58,17 @@ UA_PATTERNS = [
     (r"Chrome/([\d.]+)", "Chrome"),
     (r"Firefox/([\d.]+)", "Firefox"),
     (r"Safari/([\d.]+)", "Safari"),
+    # Previously missing -> these all fell through to the ("Other", "Unknown")
+    # fallback below, which graph_engine.py's fuzzy-fusion now deliberately
+    # excludes from earning similarity credit (matching on "we don't know" is
+    # not evidence of shared identity). Without real patterns for these, that
+    # correct fix also threw away genuinely-informative UA signal for most of
+    # this dataset's attack traffic, which predominantly uses exactly these
+    # tools (see dataset_script/env_profile.py's SCRIPT_UAS/SUSPICIOUS_UAS).
+    (r"curl/([\d.]+)", "curl"),
+    (r"python-requests/([\d.]+)", "python-requests"),
+    (r"python-urllib3/([\d.]+)", "python-urllib3"),
+    (r"Go-http-client/([\d.]+)", "Go-http-client"),
 ]
 
 

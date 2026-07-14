@@ -114,6 +114,7 @@ Thread safety
 import time
 import threading
 import logging
+import uuid
 from collections import deque
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -158,15 +159,64 @@ class MultiCloudGraphEngine:
     # cloud) — mirrors the normalization risk_engine.py already applies.
     _CLOUD_ALIASES = {"ENTRA-ID": "AZURE"}
 
+    # principal_type is cloud-native vocabulary, not a normalized concept:
+    # AWS says "IAMUser"/"AssumedRole", Azure says "User"/"ServicePrincipal",
+    # GCP says "User"/"ServiceAccount". Comparing these strings directly (as
+    # the previous version did) means a genuine human attacker's own AWS leg
+    # NEVER earns type-match credit against their own Azure/GCP legs of the
+    # SAME campaign, purely due to vocabulary mismatch -- actively hurting
+    # the exact cross-cloud stitching this engine exists for. Normalize into
+    # the same human/automation concept risk_engine.py's _classify_principal
+    # already uses, so "IAMUser" and "User" (both human) correctly match.
+    _AUTOMATION_PRINCIPAL_TYPES = {
+        "ASSUMEDROLE", "SERVICEACCOUNT", "SERVICEPRINCIPAL", "ROLE",
+        "AWSSERVICE", "AWSACCOUNT",
+    }
+    _HUMAN_PRINCIPAL_TYPES = {"IAMUSER", "USER", "ROOT", "FEDERATEDUSER"}
+
+    # Maps the internal resolution-method string to the coarse tier label used
+    # in the merge audit log (Phase 1a).
+    _AUDIT_TIER = {
+        "federation": "1-federation",
+        "provenance": "1.5-provenance",
+        "fast_path": "fast_path",
+        "fuzzy_merge": "2-fuzzy",
+        "new_entity": "new",
+        "new_entity_ambiguous": "new",
+    }
+
     def __init__(
         self,
         window_horizon_seconds: int = 60,
         similarity_threshold: float = 0.65,
         ambiguity_margin: float = 0.05,
+        tier2_lookback_seconds: float = 10800,
+        merge_audit_log: Optional[list] = None,
     ):
+        # Phase 1a: optional diagnostic. When a caller passes a list here, the
+        # engine appends one record per entity assignment (see _audit_assignment)
+        # so a downstream script can score merge correctness against ground
+        # truth. Purely additive — when None (the default) there is ZERO behavior
+        # change and no per-event overhead beyond a single `is None` check.
+        self.merge_audit_log = merge_audit_log
         self.window_horizon = window_horizon_seconds
         self.tau = similarity_threshold
         self.ambiguity_margin = ambiguity_margin
+        # Tier 2 candidate scan is bounded to entities last active within
+        # this many seconds. Without this, campaigns days/weeks apart could
+        # still merge purely because they share generic traits (UA family,
+        # proxy flag, principal type) with no time relationship at all --
+        # confirmed empirically as part of the over-merging bug (148 real
+        # identities collapsed into 3 entities). Default 10800s (3h) is
+        # derived from generate_attacks.py's PACE table: "slow" pacing gaps
+        # up to 5400s (1.5h) between consecutive steps of the SAME
+        # campaign, so 3h gives ~2x safety margin without being so long it
+        # re-admits the unrelated-campaigns-weeks-apart failure mode. This
+        # bounds Tier-2 MATCHING eligibility only -- it does not affect
+        # identity permanence (entity_anchors, lifetime clouds, and
+        # identity_map entries are still never deleted except via the
+        # explicit purge_stale_entities() call).
+        self.tier2_lookback = tier2_lookback_seconds
 
         # entity_id -> deque of {"arrival_time": float, "data": dict}
         # Transient, window-scoped. CAN legitimately be empty for a
@@ -186,9 +236,10 @@ class MultiCloudGraphEngine:
         # inside the live risk window at any one instant.
         self._entity_lifetime_clouds: Dict[str, Set[str]] = {}
 
-        # entity_id -> unix timestamp of the most recent event seen.
-        # Used only by the optional purge_stale_entities() maintenance
-        # call — not consulted on the per-event hot path.
+        # entity_id -> unix timestamp of the most recent event seen. Used by
+        # purge_stale_entities() AND (as of the tier2_lookback fix above) by
+        # _resolve_entity_id()'s Tier-2 scan, to bound which entities are
+        # even eligible for a fuzzy-fusion match.
         self._entity_last_seen: Dict[str, float] = {}
 
         # any identity key (principal string OR federation key) -> entity_id.
@@ -242,11 +293,35 @@ class MultiCloudGraphEngine:
             campaign across clouds.
         """
         with self._lock:
-            entity_id, is_new, method = self._resolve_entity_id(normalized_event)
+            now = time.time()
+            entity_id, is_new, method, similarity = self._resolve_entity_id(normalized_event, now)
+            if self.merge_audit_log is not None:
+                self._audit_assignment(normalized_event, entity_id, method, similarity)
             self._register_provenance_if_applicable(normalized_event, entity_id)
-            active_events = self._update_window(entity_id, normalized_event)
+            active_events = self._update_window(entity_id, normalized_event, now)
             lifetime_clouds = sorted(self._entity_lifetime_clouds.get(entity_id, set()))
             return entity_id, active_events, is_new, method, lifetime_clouds
+
+    def _audit_assignment(self, event: dict, entity_id: str, method: str,
+                          similarity: Optional[float]) -> None:
+        """Phase 1a: record one merge/assignment decision. Captures the entity's
+        OTHER principals as they stood BEFORE this event, so a merge that pulls a
+        second real identity into an existing entity is visible in the log. Only
+        called when merge_audit_log is enabled."""
+        principal = event.get("principal", "")
+        principals_so_far = sorted(
+            p for p, eid in self._identity_map.items()
+            if eid == entity_id and p != principal
+        )
+        self.merge_audit_log.append({
+            "event_id": event.get("event_id"),
+            "tier": self._AUDIT_TIER.get(method, method),
+            "method": method,
+            "similarity_score": similarity,
+            "entity_id": entity_id,
+            "event_principal": principal,
+            "entity_principals_so_far": principals_so_far,
+        })
 
     def get_entity_stats(self) -> dict:
         """Snapshot of current graph state, for dashboards/debugging."""
@@ -269,6 +344,25 @@ class MultiCloudGraphEngine:
                     for eid, clouds in self._entity_lifetime_clouds.items()
                 },
             }
+
+    def entity_lifetime_footprints(self) -> Dict[str, list]:
+        """Snapshot of each entity's accumulated lifetime cloud set, as sorted
+        lists. Used to seed RiskEngine per-identity baselines from a benign
+        warmup pass (Phase 1 fix) without reaching into private state."""
+        with self._lock:
+            return {eid: sorted(clouds)
+                    for eid, clouds in self._entity_lifetime_clouds.items()}
+
+    def reset_windows(self) -> None:
+        """Clear the transient 60s sliding windows while KEEPING identity,
+        lifetime-cloud, and provenance state. Needed when a benign warmup pass
+        (to learn baselines) is followed by a scoring pass whose event times
+        precede the warmup's last event: without this, stale warmup events left
+        in a window would be counted (at negative age -> full weight) against the
+        scored events. Identity persistence is intentionally untouched."""
+        with self._lock:
+            for q in self._graph_registry.values():
+                q.clear()
 
     def purge_stale_entities(self, max_idle_seconds: float) -> int:
         """
@@ -365,12 +459,33 @@ class MultiCloudGraphEngine:
     # Tier 2 — Fuzzy fusion similarity                                     #
     # ------------------------------------------------------------------ #
 
+    # Sentinel values meaning "we don't actually know this" -- matching on
+    # one of these must NEVER earn similarity credit. A signal is only
+    # evidence of shared identity if it's informative; two unrelated people
+    # who both used an unrecognized tool are not thereby similar to each
+    # other, they're both just unidentified. Bug fixed here: the previous
+    # code only excluded the literal string "Unknown", but
+    # enrichment.py's parse_user_agent() fallback returns ("Other",
+    # "Unknown") for anything that doesn't match a known UA pattern (curl,
+    # python-requests, Go-http-client, etc. -- exactly the tooling most
+    # attack traffic in this dataset uses) -- so "Other" == "Other" was
+    # silently passing the guard and awarding the full UA weight for a
+    # match on pure ignorance. Confirmed empirically: this collapsed 148
+    # distinct real identities into 3 entities on attacks_fast.
+    _UNINFORMATIVE_UA_FAMILY = {"Unknown", "Other"}
+    _UNINFORMATIVE_VALUES = {"Unknown", "Other", None, ""}
+
     def _calculate_fuzzy_similarity(self, event_a: dict, event_b: dict) -> float:
         """
         Four-signal fuzzy similarity, weights summing to 1.0.
-        (Unchanged from the previous version — see that version's
-        extensive docstring for the full reasoning on s_ua, s_proxy,
-        s_type, and the deliberately small/capped s_ip signal.)
+
+        CHANGED from the previous version: three places were awarding
+        similarity credit for two sides both lacking information, rather
+        than for two sides genuinely matching on a specific, identifying
+        value. Fixed all three (see _UNINFORMATIVE_UA_FAMILY /
+        _UNINFORMATIVE_VALUES above and inline comments below) -- this was
+        the root cause of the over-merging bug, not a threshold/weight
+        tuning issue.
         """
         score = 0.0
 
@@ -382,9 +497,13 @@ class MultiCloudGraphEngine:
         ua_a = event_a.get("ua_family", "Unknown")
         ua_b = event_b.get("ua_family", "Unknown")
 
-        if ua_a == ua_b and ua_a != "Unknown":
+        if ua_a == ua_b and ua_a not in self._UNINFORMATIVE_UA_FAMILY:
             score += self._UA_WEIGHT * 0.70
-            if event_a.get("ua_version") == event_b.get("ua_version"):
+            ver_a = event_a.get("ua_version")
+            ver_b = event_b.get("ua_version")
+            # Version sub-bonus also needs its own guard -- matching on two
+            # "Unknown" versions is exactly the same uninformative-match bug.
+            if ver_a == ver_b and ver_a not in self._UNINFORMATIVE_VALUES:
                 score += self._UA_WEIGHT * 0.30
         elif ua_a in KNOWN_AUTOMATION_FAMILIES and ua_b in KNOWN_AUTOMATION_FAMILIES:
             score += self._UA_WEIGHT * 0.20
@@ -392,10 +511,14 @@ class MultiCloudGraphEngine:
         proxy_a = bool(event_a.get("is_known_proxy_or_tor", False))
         proxy_b = bool(event_b.get("is_known_proxy_or_tor", False))
 
+        # Only a confirmed True/True match is informative (both are known
+        # Tor/hosting traffic -- genuinely rare). Removed the previous
+        # "proxy_a == proxy_b" branch, which also fired for False/False --
+        # since most traffic (benign AND most attack traffic here, given
+        # the hosting/foreign infra ASN-keyword gap) is proxy=False, that
+        # branch was awarding corroborating credit to nearly every pair.
         if proxy_a and proxy_b:
             score += self._PROXY_WEIGHT * 1.0
-        elif proxy_a == proxy_b:
-            score += self._PROXY_WEIGHT * 0.5
 
         if not proxy_a and not proxy_b:
             ip_a = event_a.get("source_ip")
@@ -403,28 +526,87 @@ class MultiCloudGraphEngine:
             if ip_a and ip_b and ip_a == ip_b:
                 score += self._IP_WEIGHT
 
-        if event_a.get("principal_type") == event_b.get("principal_type"):
+        type_a = self._normalize_principal_type(event_a.get("principal_type"))
+        type_b = self._normalize_principal_type(event_b.get("principal_type"))
+        if type_a == type_b and type_a is not None:
             score += self._TYPE_WEIGHT
 
         return round(score, 4)
+
+    def explain_fuzzy_similarity(self, event_a: dict, event_b: dict) -> dict:
+        """Diagnostic sibling of _calculate_fuzzy_similarity: returns the SAME
+        total plus a per-component breakdown (which signal contributed how much),
+        so an audit can say exactly which signal over-credited a wrong merge
+        (Phase 1b). Read-only; mirrors the scoring logic above component-for-
+        component so the two cannot silently diverge in weighting."""
+        comp = {"ua": 0.0, "proxy": 0.0, "ip": 0.0, "type": 0.0}
+
+        KNOWN_AUTOMATION_FAMILIES = {
+            "Boto3", "aws-cli", "aws-sdk-go", "Terraform",
+            "azure-cli", "google-cloud-sdk", "pulumi",
+        }
+        ua_a = event_a.get("ua_family", "Unknown")
+        ua_b = event_b.get("ua_family", "Unknown")
+        if ua_a == ua_b and ua_a not in self._UNINFORMATIVE_UA_FAMILY:
+            comp["ua"] += self._UA_WEIGHT * 0.70
+            ver_a, ver_b = event_a.get("ua_version"), event_b.get("ua_version")
+            if ver_a == ver_b and ver_a not in self._UNINFORMATIVE_VALUES:
+                comp["ua"] += self._UA_WEIGHT * 0.30
+        elif ua_a in KNOWN_AUTOMATION_FAMILIES and ua_b in KNOWN_AUTOMATION_FAMILIES:
+            comp["ua"] += self._UA_WEIGHT * 0.20
+
+        proxy_a = bool(event_a.get("is_known_proxy_or_tor", False))
+        proxy_b = bool(event_b.get("is_known_proxy_or_tor", False))
+        if proxy_a and proxy_b:
+            comp["proxy"] += self._PROXY_WEIGHT * 1.0
+        if not proxy_a and not proxy_b:
+            ip_a, ip_b = event_a.get("source_ip"), event_b.get("source_ip")
+            if ip_a and ip_b and ip_a == ip_b:
+                comp["ip"] += self._IP_WEIGHT
+
+        type_a = self._normalize_principal_type(event_a.get("principal_type"))
+        type_b = self._normalize_principal_type(event_b.get("principal_type"))
+        if type_a == type_b and type_a is not None:
+            comp["type"] += self._TYPE_WEIGHT
+
+        comp = {k: round(v, 4) for k, v in comp.items()}
+        comp["total"] = round(sum(comp.values()), 4)
+        return comp
+
+    def _normalize_principal_type(self, raw_type: Optional[str]) -> Optional[str]:
+        """Cloud-agnostic human/automation bucket -- see class docstring
+        comment above _AUTOMATION_PRINCIPAL_TYPES for why this exists.
+        Returns None for anything unrecognized, so (per the uninformative-
+        match fix above) two unrecognized types never earn credit for
+        "matching" on not being classifiable."""
+        t = str(raw_type or "").upper()
+        if t in self._AUTOMATION_PRINCIPAL_TYPES:
+            return "automation"
+        if t in self._HUMAN_PRINCIPAL_TYPES:
+            return "human"
+        return None
 
     # ------------------------------------------------------------------ #
     # Entity resolution                                                    #
     # ------------------------------------------------------------------ #
 
-    def _resolve_entity_id(self, incoming_event: dict) -> Tuple[str, bool, str]:
+    def _resolve_entity_id(self, incoming_event: dict, now: float) -> Tuple[str, bool, str, Optional[float]]:
         """
         Resolution order: Tier 1 -> fast path -> Tier 1.5 -> Tier 2 (with
         ambiguity margin) -> new entity.
 
-        CHANGED: Tier 2's scan now considers every KNOWN entity (every key
-        in _entity_anchors), not just ones with a currently non-empty
-        window. An entity whose window has drained is still a perfectly
-        valid, resolvable identity — its anchor is a fixed point in time,
-        not something that requires "recent activity" to remain valid for
-        comparison. This is required for the same reason as the rest of
-        this fix: a paced attacker whose window is momentarily empty
-        between steps must still be resolvable, not treated as gone.
+        Tier 2's scan considers every entity last active within
+        self.tier2_lookback seconds of `now` (every key in _entity_anchors
+        whose _entity_last_seen passes that bound), not just ones with a
+        currently non-empty 60s window -- an entity whose window has
+        drained is still a perfectly valid, resolvable identity, since its
+        anchor is a fixed point in time. This is what makes a paced
+        attacker whose window is momentarily empty between steps still
+        resolvable. The lookback bound (separate from the window) is what
+        stops that same reasoning from over-reaching into matching entities
+        that are ACTUALLY unrelated, just because they share generic
+        traits with no time relationship at all -- see tier2_lookback's
+        docstring in __init__ for why this bound exists.
         """
         principal = incoming_event.get("principal", "")
 
@@ -434,13 +616,13 @@ class MultiCloudGraphEngine:
                 new_id = self._create_new_entity(fed_key, incoming_event)
                 self._identity_map[principal] = new_id
                 logger.debug("Tier1 new entity %s for federation key %s", new_id, fed_key)
-                return new_id, True, "federation"
+                return new_id, True, "federation", None
             entity_id = self._identity_map[fed_key]
             self._identity_map[principal] = entity_id
-            return entity_id, False, "federation"
+            return entity_id, False, "federation", None
 
         if principal in self._identity_map:
-            return self._identity_map[principal], False, "fast_path"
+            return self._identity_map[principal], False, "fast_path", None
 
         if principal in self._provenance_map:
             creator_entity_id = self._provenance_map[principal]
@@ -450,12 +632,18 @@ class MultiCloudGraphEngine:
                     "Tier1.5 provenance match: '%s' linked to creator entity %s",
                     principal, creator_entity_id,
                 )
-                return creator_entity_id, False, "provenance"
+                return creator_entity_id, False, "provenance", None
 
         scored_candidates: List[Tuple[float, str]] = []
         for entity_id, anchor in self._entity_anchors.items():
             # NOTE: no longer filtered by "does this entity have a
             # non-empty window right now" — see method docstring above.
+            # NEW: bounded by tier2_lookback -- an entity idle longer than
+            # this is not eligible for a Tier-2 match, regardless of how
+            # similar it looks (see __init__ / method docstring for why).
+            last_seen = self._entity_last_seen.get(entity_id, 0.0)
+            if (now - last_seen) > self.tier2_lookback:
+                continue
             sim = self._calculate_fuzzy_similarity(incoming_event, anchor)
             if sim >= self.tau:
                 scored_candidates.append((sim, entity_id))
@@ -475,21 +663,21 @@ class MultiCloudGraphEngine:
                         principal, best_entity_id, best_score,
                         second_entity_id, second_score, self.ambiguity_margin,
                     )
-                    return new_id, True, "new_entity_ambiguous"
+                    return new_id, True, "new_entity_ambiguous", best_score
 
             self._identity_map[principal] = best_entity_id
             logger.debug(
                 "Tier2 merged principal '%s' into entity %s (score=%.3f)",
                 principal, best_entity_id, best_score,
             )
-            return best_entity_id, False, "fuzzy_merge"
+            return best_entity_id, False, "fuzzy_merge", best_score
 
         new_id = self._create_new_entity(principal, incoming_event)
         logger.debug(
             "New entity %s for orphaned principal '%s' (no candidates cleared tau=%.2f)",
             new_id, principal, self.tau,
         )
-        return new_id, True, "new_entity"
+        return new_id, True, "new_entity", None
 
     def _create_new_entity(self, key: str, founding_event: dict) -> str:
         """
@@ -497,7 +685,15 @@ class MultiCloudGraphEngine:
         last-seen record are all created here as PERMANENT records (only
         removed via explicit purge_stale_entities, never by window drain).
         """
-        entity_id = f"entity_{int(time.time_ns())}"
+        # NOT time.time_ns() -- confirmed empirically that this system's
+        # clock resolution is far coarser than nanoseconds (1000 rapid
+        # time.time_ns() calls returned a single identical value). Under
+        # any reasonably fast event rate, that collapsed distinct new
+        # entities created in quick succession onto the SAME dict key,
+        # silently overwriting each other in _entity_anchors /
+        # _graph_registry / _identity_map. uuid4 doesn't depend on clock
+        # resolution or call rate at all.
+        entity_id = f"entity_{uuid.uuid4().hex}"
         self._identity_map[key] = entity_id
         self._entity_anchors[entity_id] = founding_event
         self._graph_registry[entity_id] = deque()
@@ -514,7 +710,7 @@ class MultiCloudGraphEngine:
         c = str(raw_cloud or "UNKNOWN").upper()
         return self._CLOUD_ALIASES.get(c, c)
 
-    def _update_window(self, entity_id: str, incoming_event: dict) -> List[dict]:
+    def _update_window(self, entity_id: str, incoming_event: dict, now: float) -> List[dict]:
         """
         Appends the incoming event to the entity's RISK window and evicts
         window entries older than window_horizon_seconds. Also updates the
@@ -537,7 +733,7 @@ class MultiCloudGraphEngine:
         entity's anchor, lifetime clouds, and identity mappings all remain
         intact regardless.
         """
-        current_time = time.time()
+        current_time = now
         queue = self._graph_registry[entity_id]
 
         queue.append({"arrival_time": current_time, "data": incoming_event})
