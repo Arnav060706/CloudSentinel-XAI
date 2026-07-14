@@ -56,3 +56,24 @@ class XAIAlert(Base):
     dominant_shap_signal = Column(String, nullable=False)
     llama_narrative = Column(Text, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class LLMBenchmark(Base):
+    """
+    Latency/quality telemetry for the XAI narrative LLM call. Written
+    fire-and-forget from FaithfulnessGatedXAI so it never adds latency to
+    the critical path. Query this table to build the
+    model / avg-latency / prompt-size / cache-hit-rate comparison table
+    used to justify prompt and model choices.
+    """
+    __tablename__ = "llm_benchmarks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    model_name = Column(String, nullable=False)
+    predicted_phase = Column(String, nullable=False)
+    cache_hit = Column(Boolean, default=False)
+    prompt_chars = Column(Integer, default=0)
+    completion_chars = Column(Integer, default=0)
+    elapsed_seconds = Column(Float, default=0.0)
+    succeeded = Column(Boolean, default=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
