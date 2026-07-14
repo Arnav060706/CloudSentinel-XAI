@@ -120,7 +120,17 @@ class Environment:
         pool = list(self.human_names)
         self.rng.shuffle(pool)
         n_hold = int(len(pool) * holdout_frac)
+        # Keep both: the set for O(1) membership tests, and the shuffled list
+        # for anywhere iteration order matters. list(a_set) is NOT reproducible
+        # across processes -- Python's string hashing is randomized per-process
+        # (PYTHONHASHSEED) unless fixed, so set iteration order silently
+        # differs run to run even with an identical --seed, which then
+        # cascades into different env.rng draws for every subsequent user in
+        # generate_benign.py's roster loop. Confirmed empirically: two runs
+        # with identical seeds produced different event counts until this was
+        # fixed to use a deterministically-ordered list instead.
         self.holdout_users = set(pool[:n_hold])
+        self.holdout_users_ordered = pool[:n_hold]
         self.train_users = [u for u in self.human_names if u not in self.holdout_users]
 
         # --- IP pools (real ones always included, then expanded) ---

@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse, json, os, csv, datetime as dt
 from env_profile import (Environment, ml_label, BROWSER_UAS, SDK_UAS_GCP,
                          SCRIPT_UAS, SUSPICIOUS_UAS, BENIGN_GEO, FOREIGN_GEO,
-                         CORP_DOMAIN, GCP_PROJECT, AWS_ACCOUNTS)
+                         CORP_DOMAIN, GCP_PROJECT, AWS_ACCOUNTS, AWS_REGIONS)
 import emitters as em
 from attack_scenarios import ALL_SCENARIOS
 
@@ -54,7 +54,10 @@ def _emit(env, s, actor, is_service, ts, rows, aws, az, gcp, scen):
             principal_type="AssumedRole" if is_service else "IAMUser",
             error_code=None if s["success"] else "FailedAuthentication",
             read_only=s["action"].startswith(("List","Get")), labels=lbl,
-            request_params=request_params)
+            request_params=request_params,
+            # Explicit, seeded region draw -- see generate_benign.py for why
+            # aws_event()'s own unseeded-global-random default is unsafe.
+            region=rng.choice(AWS_REGIONS))
         aws.append(rec); eid = rec["eventID"]
     elif cloud == "azure":
         rec = em.azure_event(ts=ts, operation=s["action"], upn=upn, display_name=display,

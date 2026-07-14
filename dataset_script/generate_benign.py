@@ -13,12 +13,18 @@ good or bad — the same users are later drawn as attack victims.
 Usage: python generate_benign.py --days 14 --seed 42 --n-users 300 --out ./out
 """
 from __future__ import annotations
-import argparse, json, os, datetime as dt
+import argparse, json, os, random, datetime as dt
 from env_profile import (Environment, ml_label, BROWSER_UAS, SDK_UAS_AWS,
-                         SDK_UAS_GCP, BENIGN_GEO, CORP_DOMAIN, GCP_PROJECT, AWS_ACCOUNTS)
+                         SDK_UAS_GCP, BENIGN_GEO, CORP_DOMAIN, GCP_PROJECT, AWS_ACCOUNTS,
+                         AWS_REGIONS)
 import emitters as em
 
 WORK_START, WORK_END = 8, 19
+
+# Offset applied to --seed to derive the `cal` split's ACTIVITY rng stream while
+# leaving the population/identity split (built from --seed inside Environment)
+# untouched. See the `cal` handling in main() for the full rationale.
+CAL_STREAM_OFFSET = 9000
 
 AWS_USER = ["ConsoleLogin","GetUser","ListUsers","ListRoles","ListPolicies",
             "ListAttachedUserPolicies","AssumeRole"]
@@ -73,7 +79,12 @@ def gen_user_day(env, day0, day, user, role, aws, az, gcp):
                 account_id=account, ip=ip, ua=ua, success=success, mfa=not is_service,
                 principal_type="AssumedRole" if is_service else "IAMUser",
                 error_code=None if success else "FailedAuthentication",
-                read_only=action.startswith(("List","Get")), labels=_labels(rng, mild or not success)))
+                read_only=action.startswith(("List","Get")), labels=_labels(rng, mild or not success),
+                # Explicit, seeded region draw -- aws_event()'s own default
+                # falls back to the unseeded global `random` module, which
+                # breaks reproducibility (confirmed: identical --seed runs
+                # produced different awsRegion values until this was added).
+                region=rng.choice(AWS_REGIONS)))
         elif cloud == "azure":
             op = rng.choice(AZ_ADMIN if role=="human_admin" else AZ_USER)
             az.append(em.azure_event(ts=ts, operation=op, upn=upn, display_name=display,
@@ -91,11 +102,24 @@ def main():
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n-users", type=int, default=300)
-    ap.add_argument("--split", choices=["train","holdout","all"], default="train",
-                    help="which identity split to emit benign activity for")
+    ap.add_argument("--split", choices=["train","holdout","cal","all"], default="train",
+                    help="which identity split to emit benign activity for "
+                         "(cal = threshold-calibration benign, see below)")
     ap.add_argument("--out", default="./out")
     args = ap.parse_args()
     env = Environment(seed=args.seed, n_users=args.n_users)
+    # The `cal` split is a dedicated threshold-CALIBRATION benign set: the SAME
+    # population and identity split as `holdout` (so its risk-score distribution
+    # matches the eval-benign set), but a DIFFERENT activity RNG stream so its
+    # specific events are disjoint from holdout's. This lets a threshold be swept
+    # on cal-benign and then honestly evaluated on holdout-benign without reusing
+    # the same events for both — the same clean-split discipline the attack splits
+    # already have. We re-seed env.rng ONLY (population/holdout membership was
+    # already fixed by Environment(seed=...) above, mirroring generate_attacks.py's
+    # env-seed=population vs seed=activity separation, which this script otherwise
+    # folds into a single seed).
+    if args.split == "cal":
+        env.rng = random.Random(args.seed + CAL_STREAM_OFFSET)
     em.reset_ids(); em.set_run_tag(args.split); os.makedirs(args.out, exist_ok=True)
     day0 = dt.datetime(2026, 6, 1)
 
@@ -106,12 +130,19 @@ def main():
     # still being unseen by the trained model.
     if args.split == "train":
         user_subset = env.train_users
-    elif args.split == "holdout":
-        user_subset = list(env.holdout_users)
+    elif args.split in ("holdout", "cal"):
+        # NOT list(env.holdout_users) -- a set's iteration order is
+        # PYTHONHASHSEED-dependent and differs across process runs even with
+        # the same --seed, which then cascades into different env.rng draws
+        # for every user processed after. Use the deterministic ordered list.
+        # `cal` reuses the holdout population on purpose (see the re-seed note in
+        # main) so its benign score distribution matches the eval-benign set.
+        user_subset = env.holdout_users_ordered
     else:
         user_subset = env.human_names
     roster = ([(u, env.users[u]) for u in user_subset] +
-              ([(s, "service_account") for s in env.service_names] if args.split != "holdout" else []))
+              ([(s, "service_account") for s in env.service_names]
+               if args.split not in ("holdout", "cal") else []))
     for day in range(args.days):
         weekday = (day0 + dt.timedelta(days=day)).weekday()
         for user, role in roster:

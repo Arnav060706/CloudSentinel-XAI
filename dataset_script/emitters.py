@@ -36,6 +36,13 @@ def aws_event(*, ts, event_name, user_name, account_id, ip, ua,
               region=None, success=True, mfa=True, principal_type="IAMUser",
               request_params=None, response=None, error_code=None,
               labels=None, read_only=False):
+    # ALWAYS pass region= explicitly from the caller's seeded env.rng /
+    # scenario rng. This fallback uses Python's unseeded global `random`
+    # module, which is NOT reproducible across process runs (confirmed:
+    # identical --seed runs produced different awsRegion values, and
+    # differently-ordered downstream draws, until callers started passing
+    # region= explicitly). It only exists so this function doesn't crash if
+    # called without one -- it should never be relied on for generated data.
     rng = random
     region = region or rng.choice(AWS_REGIONS)
     arn = f"arn:aws:iam::{account_id}:user/{user_name}" if principal_type == "IAMUser" \
