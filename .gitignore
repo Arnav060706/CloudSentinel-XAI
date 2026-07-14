@@ -2,25 +2,28 @@
 env/
 .venv/
 
-# Prometheus db
-data/
-
-#Pycache files
+# Python caches
 **/__pycache__/
+*.pyc
 
-# Loki runtime database chunks and indices
+# Prometheus / Loki / SQLite runtime data
 data/
-/tmp/
 loki-storage/
+/tmp/
 *.db
 *.db-journal
-#csv 
-*.csv
-
-# SQLite temporary files
 *.db-shm
 *.db-wal
 
-#datast
-**/dataset/
+# CSV outputs (metrics, sweeps, scored events — all regenerable)
+*.csv
 
+# Trained model bundles (regenerable via models/train_*.py)
+*.pkl
+
+# Generated synthetic datasets (regenerable via dataset_script/ with fixed
+# seeds; also keeps the anchor company log samples out of version control)
+Datasets/
+
+# Local contributor guide (machine-specific, not part of the shared repo)
+CLAUDE.md
