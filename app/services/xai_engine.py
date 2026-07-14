@@ -15,10 +15,8 @@ error string into the permanent forensic ledger as if it were a finding.
 
 import asyncio
 import logging
-import pandas as pd
+import numpy as np
 from typing import Tuple
-
-from app.services.ml_inference import ParallelMLEngine
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +33,29 @@ except Exception:  # ImportError or partial installs
 
 class FaithfulnessGatedXAI:
     def __init__(self, state_matrix: dict, ollama_host: str = "http://localhost:11434"):
-        self.xgboost_model = state_matrix.get("xgboost")
-        self.feature_encoder = state_matrix.get("feature_encoder")
+        # Phase 6: the deletion test now operates in ENGINEERED feature space --
+        # the exact vector the model saw, carried on the event as
+        # "xgb_feature_row" by ml_inference.py -- using the bundle's own
+        # feature_columns + a background_sample (reference values for "deletion",
+        # since 0 is a meaningful value for encoded categoricals/counts).
+        xgb_bundle = state_matrix.get("xgboost_bundle") or {}
+        self.xgboost_model = xgb_bundle.get("model")
+        self.xgb_feature_columns = xgb_bundle.get("feature_columns")
+        self.background_sample = xgb_bundle.get("background_sample")
+        if self.xgboost_model is not None:
+            # Keep predict on CPU: a GPU-resident booster + SHAP crashes the
+            # process natively (see ml_inference.py / models/README.md). predict
+            # here is single-row, so CPU is free.
+            try:
+                self.xgboost_model.set_params(device="cpu")
+            except Exception:
+                pass
+        # Per-column reference vector ("typical" value) derived once from the
+        # background sample; deleting a feature == setting it to this.
+        self._background_ref = (
+            np.median(np.asarray(self.background_sample, dtype=float), axis=0)
+            if self.background_sample is not None else None
+        )
         self.faithfulness_delta = 0.15
 
         self.llm_client = AsyncClient(host=ollama_host) if OLLAMA_AVAILABLE else None
@@ -121,50 +140,66 @@ class FaithfulnessGatedXAI:
         original_confidence: float,
         original_class_index: int,
     ) -> bool:
-        if not self.xgboost_model or not shap_attributions:
-            return False
-
-        # CRITICAL FIX: build the perturbed vector from the MODEL'S FEATURE
-        # SCHEMA only, not from every stray key in log_data (timestamp,
-        # raw_log, user_id, severity, ...). Feeding arbitrary columns to the
-        # model produced meaningless probabilities and invalidated the gate.
-        feature_names = ParallelMLEngine._ORDERED_FEATURES
-        perturbed = {feat: log_data.get(feat, "Unknown") for feat in feature_names}
-
-        # "Delete" the top-attributed features by resetting to a baseline.
-        for feature_name in shap_attributions.keys():
-            if feature_name in perturbed:
-                val = perturbed[feature_name]
-                if isinstance(val, bool):
-                    perturbed[feature_name] = False
-                elif isinstance(val, str):
-                    perturbed[feature_name] = "Unknown"
-                else:
-                    perturbed[feature_name] = 0.0
-
-        df = pd.DataFrame([perturbed])[feature_names]
-
-        if self.feature_encoder is not None:
-            try:
-                x_tensor = self.feature_encoder.transform(df)
-            except Exception as e:
-                logger.error("Encoding failed during deletion test: %s", e)
-                return False
-        else:
-            # Without the fitted encoder we cannot faithfully re-run the model.
-            logger.error("No feature_encoder; cannot run deletion test faithfully.")
-            return False
-
+        """Faithfulness gate in ENGINEERED feature space. Deleting the top-
+        SHAP-attributed features (replacing them with background reference
+        values) must drop the predicted class's confidence by MORE than deleting
+        the same number of RANDOM non-attributed features -- a paired control, so
+        the gate measures attribution faithfulness, not generic input
+        sensitivity. Fails CLOSED (returns False) on any missing input or error.
+        """
         try:
-            probabilities = self.xgboost_model.predict_proba(x_tensor)[0]
+            if not self.xgboost_model or not shap_attributions:
+                return False
+            if self.xgb_feature_columns is None or self._background_ref is None:
+                logger.error("Deletion test needs feature_columns + background_sample "
+                             "in the XGBoost bundle (retrain / --background-only).")
+                return False
+            row = log_data.get("xgb_feature_row")
+            if not row:
+                logger.error("No engineered xgb_feature_row on event; failing closed.")
+                return False
+
+            cols = list(self.xgb_feature_columns)
+            col_idx = {c: i for i, c in enumerate(cols)}
+            x0 = np.array([[float(row.get(c, 0.0)) for c in cols]], dtype=float)
+            ref = self._background_ref
+
+            top_feats = [f for f in shap_attributions.keys() if f in col_idx]
+            non_top = [c for c in cols if c not in set(top_feats)]
+            k = len(top_feats)
+            if k == 0 or len(non_top) < k:
+                return False
+
+            def conf(x):
+                p = self.xgboost_model.predict_proba(x)[0]
+                if original_class_index >= len(p):
+                    raise IndexError("class index out of bounds")
+                return float(p[original_class_index])
+
+            base_conf = conf(x0)
+
+            # Delete ALL top-attributed features jointly -> reference values.
+            x_top = x0.copy()
+            for f in top_feats:
+                x_top[0, col_idx[f]] = ref[col_idx[f]]
+            top_drop = base_conf - conf(x_top)
+
+            # Paired control: delete k RANDOM non-top features, averaged over a
+            # few draws to reduce variance (seeded -> deterministic gate).
+            rng = np.random.default_rng(0)
+            control_drops = []
+            for _ in range(5):
+                pick = rng.choice(len(non_top), size=k, replace=False)
+                x_ctl = x0.copy()
+                for j in pick:
+                    ci = col_idx[non_top[j]]
+                    x_ctl[0, ci] = ref[ci]
+                control_drops.append(base_conf - conf(x_ctl))
+            control_drop = float(np.mean(control_drops))
+
+            # Faithful iff the attributed features matter MORE than random ones,
+            # by at least faithfulness_delta.
+            return (top_drop - control_drop) >= self.faithfulness_delta
         except Exception as e:
-            logger.error("XGBoost inference failed during deletion test: %s", e)
+            logger.error("Deletion test failed (fail-closed): %s", e)
             return False
-
-        if original_class_index >= len(probabilities):
-            logger.error("Class index %s out of bounds.", original_class_index)
-            return False
-
-        new_confidence = probabilities[original_class_index]
-        confidence_drop = original_confidence - new_confidence
-        return confidence_drop >= self.faithfulness_delta
