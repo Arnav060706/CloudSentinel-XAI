@@ -170,7 +170,11 @@ async def health():
     return {
         "status": "ONLINE",
         "engine": "cloud sentinel",
-        "ml_bypass": not (state_matrix.get("iso_forest") and state_matrix.get("xgboost")),
+        # NOTE: this used to check state_matrix.get("iso_forest")/"xgboost",
+        # keys nothing sets (see _load_ml_artifacts above, which sets
+        # "iso_forest_bundle"/"xgboost_bundle") -- so /health always reported
+        # bypass=True even with trained models loaded and scoring correctly.
+        "ml_bypass": not (state_matrix.get("iso_forest_bundle") and state_matrix.get("xgboost_bundle")),
         "known_entities": (
             state_matrix["graph_engine"].get_entity_stats()["known_entities"]
             if "graph_engine" in state_matrix else 0

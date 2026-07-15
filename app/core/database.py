@@ -1,4 +1,33 @@
 # app/core/database.py
+"""
+Database engine/session setup.
+
+Backend is now chosen by the DATABASE_URL environment variable instead of
+being hardcoded to a single SQLite file. This is what lets the exact same
+codebase run against SQLite for local dev/tests (the default, zero-setup)
+and against PostgreSQL in production, with no code changes on either side
+-- just set DATABASE_URL and install the matching async driver:
+
+    # default (unchanged): local SQLite file, good for dev/tests
+    unset DATABASE_URL
+    # or: DATABASE_URL=sqlite+aiosqlite:///./cloud_sentinel.db
+
+    # PostgreSQL (recommended for anything beyond a single dev box):
+    DATABASE_URL=postgresql+asyncpg://user:password@host:5432/cloudsentinel
+    # requires: pip install asyncpg
+
+Why this matters for CloudSentinel specifically: db_flusher.py, main.py's
+startup, and the ingest pipeline all write concurrently under real load
+(write-coalesced risk-state updates every few seconds, plus XAIAlert and
+LLMBenchmark inserts on every critical alert). SQLite's single-writer model
+and file-level locking is fine for a single dev/demo process, but becomes a
+bottleneck and an operational liability (one file, no replication, no
+concurrent-writer scaling, easy to corrupt on a hard crash) the moment this
+runs as more than one process or needs real uptime guarantees. Postgres
+removes all of that with the same SQLAlchemy models and the same upsert
+call sites (see db_flusher.py's dialect-aware insert()).
+"""
+import os
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
@@ -8,22 +37,33 @@ from sqlalchemy import event
 
 logger = logging.getLogger(__name__)
 
-# The SQLAlchemy Abstraction Layer
-DATABASE_URL = "sqlite+aiosqlite:///./cloud_sentinel.db"
+# The SQLAlchemy Abstraction Layer. Defaults to the original local SQLite
+# file so existing dev setups / `uvicorn app.main:app` / the test suite need
+# zero configuration; set DATABASE_URL to point at Postgres in production.
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./cloud_sentinel.db")
+_IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=False,
-    connect_args={"check_same_thread": False}
-)
+_engine_kwargs = {"echo": False}
+if _IS_SQLITE:
+    # check_same_thread is a SQLite/DBAPI-specific connect arg; passing it to
+    # asyncpg's connect() raises TypeError, so it must only apply here.
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
 
-# Enable Write-Ahead Logging (WAL) for SQLite concurrent reads
-@event.listens_for(engine.sync_engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record):
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.close()
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
+
+if _IS_SQLITE:
+    # Enable Write-Ahead Logging (WAL) for SQLite concurrent reads. These
+    # PRAGMAs are meaningless (and the hook itself is never fired) on
+    # Postgres, which has its own, far more capable MVCC/WAL implementation
+    # out of the box -- nothing to configure here for that path.
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+else:
+    logger.info("Using non-SQLite database backend: %s", engine.url.get_backend_name())
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine, 
