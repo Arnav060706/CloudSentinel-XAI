@@ -1,0 +1,64 @@
+{
+  "id": null,
+  "uid": "csx-01-incidents",
+  "title": "CloudSentinel-XAI — 01 Live Incidents",
+  "description": "Real-time critical-alert stream and burst/timeline view, in one place.",
+  "tags": ["cloudsentinel-xai"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-3h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Critical Alerts (last 5m)",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "increase(security_critical_alerts_total[5m])", "legendFormat": "Critical alerts (5m)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Critical Alerts per Minute",
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "increase(security_critical_alerts_total[1m])", "legendFormat": "Critical alerts", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "red" }, "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 3, "type": "table", "title": "Live Critical Alert Stream",
+      "description": "Parsed columns from the raw log line. Full SHAP/explainability breakdown lives on 02 Investigation.",
+      "gridPos": { "h": 9, "w": 18, "x": 0, "y": 6 },
+      "datasource": { "type": "loki", "uid": "bfq5wvn4009hcf" },
+      "targets": [{ "expr": "{job=\"security-triage-pipeline\"} |= \"[CRITICAL XAI REPORT]\" | regexp `entity=(?P<entity>\\S+) principal=(?P<principal>\\S+) action=(?P<action>.*?) risk=(?P<risk>[\\d.]+) phase=(?P<phase_line>\\S+) :: (?P<narrative>.*) :: shap=(?P<shap>\\{.*\\})`", "refId": "A" }],
+      "transformations": [
+        { "id": "extractFields", "options": { "source": "labels", "format": "json", "keepTime": true } },
+        { "id": "organize", "options": {
+            "excludeByName": { "id": true, "job": true, "labelTypes": true, "labels": true, "service_name": true, "tsNs": true, "Line": true, "phase_line": true, "detected_level": true, "shap": true },
+            "indexByName": { "Time": 0, "principal": 1, "entity": 2, "action": 3, "risk": 4, "phase": 5, "cloud_provider": 6, "narrative": 7 },
+            "renameByName": { "principal": "User Identity", "entity": "Entity (stitched)", "action": "Action", "risk": "Risk", "phase": "Phase", "cloud_provider": "Cloud", "narrative": "Narrative" }
+        } }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [
+        { "matcher": { "id": "byName", "options": "Time" }, "properties": [{ "id": "custom.width", "value": 155 }] },
+        { "matcher": { "id": "byName", "options": "User Identity" }, "properties": [{ "id": "custom.width", "value": 220 }] },
+        { "matcher": { "id": "byName", "options": "Entity (stitched)" }, "properties": [{ "id": "custom.width", "value": 220 }] },
+        { "matcher": { "id": "byName", "options": "Action" }, "properties": [{ "id": "custom.width", "value": 130 }] },
+        { "matcher": { "id": "byName", "options": "Risk" }, "properties": [{ "id": "custom.width", "value": 70 }] },
+        { "matcher": { "id": "byName", "options": "Phase" }, "properties": [{ "id": "custom.width", "value": 90 }] },
+        { "matcher": { "id": "byName", "options": "Cloud" }, "properties": [{ "id": "custom.width", "value": 80 }] },
+        { "matcher": { "id": "byName", "options": "Narrative" }, "properties": [{ "id": "custom.width", "value": 550 }] }
+      ] },
+      "options": { "showHeader": true, "cellHeight": "sm", "sortBy": [{ "displayName": "Time", "desc": true }] }
+    },
+    {
+      "id": 4, "type": "dashlist", "title": "Switch Dashboard",
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 6 },
+      "options": { "tags": ["cloudsentinel-xai"], "maxItems": 15, "showHeadings": false,
+        "showRecentlyViewed": false, "showSearch": true, "showStarred": false }
+    }
+  ]
+}

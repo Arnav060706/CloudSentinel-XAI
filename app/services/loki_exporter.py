@@ -12,6 +12,7 @@ the log LINE, not the labels — keeping Loki's index small.
 
 import os
 import time
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,9 @@ async def push_narrative_to_loki(
     action: str,
     risk_score,
     narrative_text: str,
+    phase: str = "Normal",
+    shap_attributions: dict = None,
+    principal: str = None,
 ) -> None:
     if not _HTTPX_AVAILABLE:
         logger.debug("httpx not installed — skipping Loki push.")
@@ -40,9 +44,10 @@ async def push_narrative_to_loki(
     timestamp_ns = str(time.time_ns())
     # Sanitize newlines/quotes so the log line stays single-line and clean.
     clean = str(narrative_text).replace("\n", " ").replace('"', "'").strip()
+    shap_json = json.dumps(shap_attributions or {}, default=str)
     line = (
-        f"[CRITICAL XAI REPORT] entity={entity_id} action={action} "
-        f"risk={risk_score} :: {clean}"
+        f"[CRITICAL XAI REPORT] entity={entity_id} principal={principal or entity_id} "
+        f"action={action} risk={risk_score} phase={phase} :: {clean} :: shap={shap_json}"
     )
 
     payload = {
@@ -51,6 +56,7 @@ async def push_narrative_to_loki(
                 "stream": {
                     "job": "security-triage-pipeline",
                     "cloud_provider": str(cloud_provider or "UNKNOWN").upper(),
+                    "phase": str(phase or "Normal"),
                 },
                 "values": [[timestamp_ns, line]],
             }

@@ -1,0 +1,65 @@
+{
+  "id": null,
+  "uid": "csx-05-systemhealth",
+  "title": "CloudSentinel-XAI — 05 System Health",
+  "description": "Composite risk trend, per-engine (Isolation Forest / XGBoost) health, and ingestion pipeline health, in one operational view.",
+  "tags": ["cloudsentinel-xai"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Max Risk Intensity (Hawkes λ) over time",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "security_max_risk_intensity", "legendFormat": "Hawkes lambda (max)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 },
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 5 }] } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Engine Risk Probability (IF vs XGBoost)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "security_engine_risk_probability", "legendFormat": "{{engine_name}} / {{cloud_provider}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "color": { "mode": "palette-classic" },
+        "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "App Up",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "up{job=\"cloudsentinel-app\"}", "legendFormat": "up", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short",
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+        "mappings": [{ "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Ingestion Rate (events/sec)",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "rate(security_pipeline_processed_events_total[1m])", "legendFormat": "events/sec", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "fixed", "fixedColor": "green" } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Ingestion Rate over Time",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "rate(security_pipeline_processed_events_total[1m])", "legendFormat": "events/sec", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps", "color": { "mode": "fixed", "fixedColor": "green" }, "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 6, "type": "dashlist", "title": "Switch Dashboard",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 8 },
+      "options": { "tags": ["cloudsentinel-xai"], "maxItems": 15, "showHeadings": false,
+        "showRecentlyViewed": false, "showSearch": true, "showStarred": false }
+    }
+  ]
+}

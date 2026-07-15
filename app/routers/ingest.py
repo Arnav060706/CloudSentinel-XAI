@@ -165,6 +165,11 @@ async def process_log_through_engine(log_data: dict):
             anomaly_score=scored_log.get("anomaly_score", 0.0),
             phase_confidence=scored_log.get("phase_confidence", 0.0),
         )
+        metrics_exporter.record_phase_and_shap(
+            cloud_provider=scored_log.get("source_cloud", "UNKNOWN"),
+            predicted_phase=scored_log.get("predicted_phase", "Normal"),
+            shap_attributions=scored_log.get("shap_attributions", {}),
+        )
 
         # -- Step 2: Identity stitching + lifetime cross-cloud tracking -----
         # New graph engine returns a 5-tuple; lifetime_clouds is what makes
@@ -215,6 +220,9 @@ async def process_log_through_engine(log_data: dict):
                 action=scored_log.get("action", "Unknown"),
                 risk_score=risk_result.get("scaled_score"),
                 narrative_text=loki_line,
+                phase=scored_log.get("predicted_phase", "Normal"),
+                shap_attributions=scored_log.get("shap_attributions", {}),
+                principal=scored_log.get("principal", entity_id),
             )
 
             # Only persist a real, successfully generated narrative to the

@@ -1,0 +1,64 @@
+{
+  "id": null,
+  "uid": "csx-00-overview",
+  "title": "CloudSentinel-XAI — 00 Overview",
+  "description": "Landing page: top-line KPIs only. Drill into 01 Live Incidents, 02 Investigation, or 03 System Health for detail.",
+  "tags": ["cloudsentinel-xai"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Total Critical Alerts",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "sum(security_critical_alerts_total)", "legendFormat": "Critical alerts", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 10 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 2, "type": "gauge", "title": "Entity Cross-Cloud Footprint",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "security_entity_cloud_span", "legendFormat": "Distinct clouds", "refId": "A" }],
+      "fieldConfig": { "defaults": { "min": 0, "max": 3, "decimals": 0,
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 2 }, { "color": "red", "value": 3 }] } }, "overrides": [] },
+      "options": {}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Max Risk Intensity (Hawkes λ)",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "security_max_risk_intensity", "legendFormat": "Max intensity", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short",
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 5 }] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Total Events Processed",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "security_pipeline_processed_events_total", "legendFormat": "Events", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Critical Alert Rate Over Time",
+      "gridPos": { "h": 8, "w": 18, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "increase(security_critical_alerts_total[5m])", "legendFormat": "Critical alerts (5m)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "red" }, "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+    },
+    {
+      "id": 6, "type": "dashlist", "title": "Switch Dashboard",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 6 },
+      "options": { "tags": ["cloudsentinel-xai"], "maxItems": 15, "showHeadings": false,
+        "showRecentlyViewed": false, "showSearch": true, "showStarred": false }
+    }
+  ]
+}

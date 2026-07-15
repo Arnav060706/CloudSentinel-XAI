@@ -1,0 +1,66 @@
+{
+  "id": null,
+  "uid": "csx-04-incidentnarratives",
+  "title": "CloudSentinel-XAI — 04 Incident Narratives",
+  "description": "Full critical-incident table: who (User Identity + stitched Entity ID), what action, risk, phase, the LLM narrative, and SHAP attributions.",
+  "tags": ["cloudsentinel-xai"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "cloud_provider",
+        "type": "custom",
+        "label": "Cloud Provider",
+        "query": "AWS,AZURE,GCP",
+        "current": { "text": "All", "value": "$__all" },
+        "options": [
+          { "text": "All", "value": "$__all", "selected": true },
+          { "text": "AWS", "value": "AWS", "selected": false },
+          { "text": "AZURE", "value": "AZURE", "selected": false },
+          { "text": "GCP", "value": "GCP", "selected": false }
+        ],
+        "includeAll": true,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 2, "type": "table", "title": "Critical Narratives — Who, Why, SHAP",
+      "description": "User Identity (post-stitching login name, e.g. alice.chen) is its own column, separate from the free-text Narrative — the LLM narrative may still mention the name in its own prose, but the column itself never depends on that.",
+      "gridPos": { "h": 24, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "bfq5wvn4009hcf" },
+      "targets": [{ "expr": "{job=\"security-triage-pipeline\", cloud_provider=~\"$cloud_provider\"} |= \"shap=\" | regexp `entity=(?P<entity>\\S+) principal=(?P<principal>\\S+) action=(?P<action>.*?) risk=(?P<risk>[\\d.]+) phase=(?P<phase_line>\\S+) :: (?P<narrative>.*) :: shap=(?P<shap>\\{.*\\})`", "refId": "A" }],
+      "transformations": [
+        { "id": "extractFields", "options": { "source": "labels", "format": "json", "keepTime": true } },
+        { "id": "organize", "options": {
+            "excludeByName": { "id": true, "job": true, "labelTypes": true, "labels": true, "service_name": true, "tsNs": true, "Line": true, "phase_line": true, "detected_level": true },
+            "indexByName": { "Time": 0, "principal": 1, "entity": 2, "action": 3, "risk": 4, "phase": 5, "cloud_provider": 6, "narrative": 7, "shap": 8 },
+            "renameByName": { "principal": "User Identity", "entity": "Entity (stitched)", "action": "Action", "risk": "Risk", "phase": "Phase", "cloud_provider": "Cloud", "narrative": "Narrative", "shap": "SHAP" }
+        } }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [
+        { "matcher": { "id": "byName", "options": "Time" }, "properties": [{ "id": "custom.width", "value": 155 }] },
+        { "matcher": { "id": "byName", "options": "User Identity" }, "properties": [{ "id": "custom.width", "value": 220 }] },
+        { "matcher": { "id": "byName", "options": "Entity (stitched)" }, "properties": [{ "id": "custom.width", "value": 220 }] },
+        { "matcher": { "id": "byName", "options": "Action" }, "properties": [{ "id": "custom.width", "value": 130 }] },
+        { "matcher": { "id": "byName", "options": "Risk" }, "properties": [{ "id": "custom.width", "value": 70 }] },
+        { "matcher": { "id": "byName", "options": "Phase" }, "properties": [{ "id": "custom.width", "value": 90 }] },
+        { "matcher": { "id": "byName", "options": "Cloud" }, "properties": [{ "id": "custom.width", "value": 80 }] },
+        { "matcher": { "id": "byName", "options": "Narrative" }, "properties": [{ "id": "custom.width", "value": 600 }] },
+        { "matcher": { "id": "byName", "options": "SHAP" }, "properties": [{ "id": "custom.width", "value": 400 }] }
+      ] },
+      "options": { "showHeader": true, "cellHeight": "md", "sortBy": [{ "displayName": "Time", "desc": true }] }
+    },
+    {
+      "id": 1, "type": "dashlist", "title": "Switch Dashboard",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 24 },
+      "options": { "tags": ["cloudsentinel-xai"], "maxItems": 15, "showHeadings": false,
+        "showRecentlyViewed": false, "showSearch": true, "showStarred": false }
+    }
+  ]
+}

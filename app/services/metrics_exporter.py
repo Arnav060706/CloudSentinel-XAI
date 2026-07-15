@@ -47,14 +47,34 @@ MAX_RISK_INTENSITY = Gauge(
 
 CRITICAL_ALERTS = Counter(
     "security_critical_alerts_total",
-    "Total critical alerts raised, by cloud provider",
-    ["cloud_provider"],
+    "Total critical alerts raised (entity-level, cross-cloud)",
 )
 
 ENTITY_CLOUD_SPAN = Gauge(
     "security_entity_cloud_span",
     "Lifetime distinct-cloud footprint size for the most recently scored entity",
 )
+
+PHASE_EVENTS = Counter(
+    "security_predicted_phase_total",
+    "Count of events by predicted MITRE ATT&CK phase",
+    ["phase", "cloud_provider"],
+)
+
+SHAP_FEATURE_IMPACT = Gauge(
+    "security_shap_top_feature_impact",
+    "Latest SHAP impact value for a top contributing feature",
+    ["feature_name", "cloud_provider"],
+)
+
+
+def record_phase_and_shap(cloud_provider: str, predicted_phase: str, shap_attributions: dict) -> None:
+    cloud = (cloud_provider or "UNKNOWN").upper()
+    PHASE_EVENTS.labels(phase=predicted_phase or "Normal", cloud_provider=cloud).inc()
+    for feature_name, info in (shap_attributions or {}).items():
+        SHAP_FEATURE_IMPACT.labels(feature_name=feature_name, cloud_provider=cloud).set(
+            float(info.get("shap_impact", 0.0))
+        )
 
 
 def record_event_processed() -> None:
@@ -75,4 +95,4 @@ def record_risk_result(user_identity: str, cloud_provider: str, risk_result: dic
     MAX_RISK_INTENSITY.set(float(risk_result.get("risk_intensity", 0.0)))
     ENTITY_CLOUD_SPAN.set(int(risk_result.get("cloud_span_count", 0)))
     if risk_result.get("is_critical"):
-        CRITICAL_ALERTS.labels(cloud_provider=cloud).inc()
+        CRITICAL_ALERTS.inc()

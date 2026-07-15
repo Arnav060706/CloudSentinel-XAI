@@ -1,0 +1,57 @@
+{
+  "id": null,
+  "uid": "csx-02-investigation",
+  "title": "CloudSentinel-XAI — 02 Investigation",
+  "description": "Top SHAP drivers + current identity trust scores. Full incident narrative table: 04 Incident Narratives. ATT&CK phase breakdown: 03 ATT&CK Phase.",
+  "tags": ["cloudsentinel-xai"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "cloud_provider",
+        "type": "custom",
+        "label": "Cloud Provider",
+        "query": "AWS,AZURE,GCP",
+        "current": { "text": "All", "value": "$__all" },
+        "options": [
+          { "text": "All", "value": "$__all", "selected": true },
+          { "text": "AWS", "value": "AWS", "selected": false },
+          { "text": "AZURE", "value": "AZURE", "selected": false },
+          { "text": "GCP", "value": "GCP", "selected": false }
+        ],
+        "includeAll": true,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "bargauge", "title": "Top SHAP Feature Impact ($cloud_provider)",
+      "gridPos": { "h": 9, "w": 18, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "security_shap_top_feature_impact{cloud_provider=~\"$cloud_provider\"}", "legendFormat": "{{feature_name}} / {{cloud_provider}}", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "continuous-BlPu" } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal" }
+    },
+    {
+      "id": 6, "type": "dashlist", "title": "Switch Dashboard",
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 0 },
+      "options": { "tags": ["cloudsentinel-xai"], "maxItems": 15, "showHeadings": false,
+        "showRecentlyViewed": false, "showSearch": true, "showStarred": false }
+    },
+    {
+      "id": 4, "type": "table", "title": "User Trust Score ($cloud_provider)",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
+      "targets": [{ "expr": "security_user_trust_score{cloud_provider=~\"$cloud_provider\"}", "format": "table", "instant": true, "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short",
+        "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "orange", "value": 40 }, { "color": "green", "value": 70 }] },
+        "custom": { "cellOptions": { "type": "color-background" } } }, "overrides": [] },
+      "options": { "showHeader": true }
+    }
+  ]
+}
