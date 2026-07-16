@@ -48,9 +48,19 @@
       "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
       "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
       "targets": [{ "expr": "security_user_trust_score{cloud_provider=~\"$cloud_provider\"}", "format": "table", "instant": true, "refId": "A" }],
-      "fieldConfig": { "defaults": { "unit": "short",
-        "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "orange", "value": 40 }, { "color": "green", "value": 70 }] },
-        "custom": { "cellOptions": { "type": "color-background" } } }, "overrides": [] },
+      "transformations": [
+        { "id": "organize", "options": {
+            "excludeByName": { "Time": true, "__name__": true, "app": true, "instance": true, "job": true },
+            "indexByName": { "user_identity": 0, "cloud_provider": 1, "Value": 2 },
+            "renameByName": { "user_identity": "User Identity", "cloud_provider": "Cloud", "Value": "Trust Score" }
+        } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "cellOptions": { "type": "auto" } } }, "overrides": [
+        { "matcher": { "id": "byName", "options": "Trust Score" }, "properties": [
+            { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+            { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 50 }] } }
+        ] }
+      ] },
       "options": { "showHeader": true }
     }
   ]
