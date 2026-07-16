@@ -2,7 +2,7 @@
   "id": null,
   "uid": "csx-03-attackphase",
   "title": "CloudSentinel-XAI — 03 ATT&CK Phase",
-  "description": "Predicted MITRE ATT&CK phase distribution, full-page.",
+  "description": "Predicted MITRE ATT&CK phase distribution, minimal view.",
   "tags": ["cloudsentinel-xai"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -31,27 +31,24 @@
   "panels": [
     {
       "id": 1, "type": "barchart", "title": "Predicted ATT&CK Phase Distribution ($cloud_provider)",
-      "gridPos": { "h": 20, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 13, "w": 14, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
-      "targets": [{ "expr": "sum by (phase, cloud_provider) (security_predicted_phase_total{cloud_provider=~\"$cloud_provider\"})", "legendFormat": "{{phase}} / {{cloud_provider}}", "refId": "A" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" },
-          "custom": { "scaleDistribution": { "type": "log", "log": 10 } } }, "overrides": [
-        { "matcher": { "id": "byRegexp", "options": "^Normal" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^Reconnaissance" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^CredentialCreation" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^SuspiciousLogin" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "light-orange" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^SuspiciousServiceAccountCreation" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^DefenseEvasion" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-purple" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^BruteForce" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-red" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^PrivilegeEscalation" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^UnauthorizedAccessAttempt" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-red" } }] },
-        { "matcher": { "id": "byRegexp", "options": "^AccountCompromised" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-red" } }] }
-      ] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "orientation": "auto" }
+      "targets": [{ "expr": "sum by (phase) (security_predicted_phase_total{cloud_provider=~\"$cloud_provider\"})", "format": "table", "instant": true, "refId": "A" }],
+      "transformations": [
+        { "id": "organize", "options": {
+            "excludeByName": { "Time": true },
+            "indexByName": { "phase": 0, "Value": 1 },
+            "renameByName": { "Value": "Count" }
+        } }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "#2CB5A6" },
+          "custom": { "axisBorderShow": true } }, "overrides": [] },
+      "options": { "legend": { "showLegend": false }, "orientation": "auto", "xTickLabelRotation": -30,
+        "barWidth": 0.6, "groupWidth": 0.7, "showValue": "never", "tooltip": { "mode": "single" } }
     },
     {
       "id": 2, "type": "dashlist", "title": "Switch Dashboard",
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 20 },
+      "gridPos": { "h": 6, "w": 6, "x": 16, "y": 0 },
       "options": { "tags": ["cloudsentinel-xai"], "maxItems": 15, "showHeadings": false,
         "showRecentlyViewed": false, "showSearch": true, "showStarred": false }
     }
