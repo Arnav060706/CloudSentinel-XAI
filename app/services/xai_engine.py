@@ -88,7 +88,7 @@ except Exception:  # ImportError or partial installs
     OLLAMA_AVAILABLE = False
 
 DEFAULT_MODEL = os.getenv("XAI_LLM_MODEL", "llama3.2")
-LLM_TIMEOUT_SECONDS = float(os.getenv("XAI_LLM_TIMEOUT_SECONDS", "8.0"))
+LLM_TIMEOUT_SECONDS = float(os.getenv("XAI_LLM_TIMEOUT_SECONDS", "120.0"))
 LLM_RETRY_ATTEMPTS = int(os.getenv("XAI_LLM_RETRY_ATTEMPTS", "2"))
 
 SYSTEM_INSTRUCTION = (
