@@ -27,3 +27,6 @@ Datasets/
 
 # Local contributor guide (machine-specific, not part of the shared repo)
 CLAUDE.md
+
+# Claude Code local config (machine-specific; never commit)
+.claude/
