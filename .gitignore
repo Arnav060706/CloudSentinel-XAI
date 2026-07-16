@@ -27,11 +27,8 @@ Datasets/
 
 # Local contributor guide (machine-specific, not part of the shared repo)
 CLAUDE.md
-<<<<<<< HEAD
 
 # Claude Code local config (machine-specific; never commit)
 .claude/
-=======
 RUNBOOK.md
 
->>>>>>> 120e7870770e9efb7080ac70bdd3d29424c866c7
