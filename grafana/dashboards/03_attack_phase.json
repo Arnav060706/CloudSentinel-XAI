@@ -35,6 +35,7 @@
       "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
       "targets": [{ "expr": "sum by (phase) (security_predicted_phase_total{cloud_provider=~\"$cloud_provider\"})", "format": "table", "instant": true, "refId": "A" }],
       "transformations": [
+        { "id": "labelsToFields", "options": { "valueLabel": "Value" } },
         { "id": "organize", "options": {
             "excludeByName": { "Time": true },
             "indexByName": { "phase": 0, "Value": 1 },

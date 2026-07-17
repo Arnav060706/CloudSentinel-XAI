@@ -49,6 +49,7 @@
       "datasource": { "type": "prometheus", "uid": "ffq2ixds39wjkc" },
       "targets": [{ "expr": "security_user_trust_score{cloud_provider=~\"$cloud_provider\"}", "format": "table", "instant": true, "refId": "A" }],
       "transformations": [
+        { "id": "labelsToFields", "options": { "valueLabel": "Value" } },
         { "id": "organize", "options": {
             "excludeByName": { "Time": true, "__name__": true, "app": true, "instance": true, "job": true },
             "indexByName": { "user_identity": 0, "cloud_provider": 1, "Value": 2 },
