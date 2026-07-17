@@ -225,6 +225,7 @@ def prepare_set(holdout_dir, attack_dir, baseline_dir, iso_bundle, xgb_bundle):
     unified = unified_h + unified_a
     y = np.concatenate([y_h, y_a])
     gt_keys = [m.get("gt_principal") for m in (meta_h + meta_a)]
+    event_ids = [m.get("event_id") for m in (meta_h + meta_a)]
 
     iso_ex = MLFeatureExtractor(); iso_ex.label_encoders = iso_bundle["label_encoders"]
     X_iso = featurize_and_align(unified, iso_ex, iso_bundle["feature_columns"],
@@ -265,6 +266,9 @@ def prepare_set(holdout_dir, attack_dir, baseline_dir, iso_bundle, xgb_bundle):
         "iso": [events_iso[i] for i in order],
         "xgb": [events_xgb[i] for i in order],
         "gt": [gt_keys[i] for i in order],
+        # Phase 7: per-event join key back to attack_labels.csv, for
+        # campaign-level grouping (models/evaluate_campaign_recall.py).
+        "event_id": [event_ids[i] for i in order],
         "y": y[order],
         "base_events": base_events, "base_gt": base_gt,
         "n": len(unified), "n_attack": int(y.sum()),
