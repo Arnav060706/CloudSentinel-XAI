@@ -88,7 +88,7 @@ The project is also transparent about where it is still weak — see [Model Perf
 
 ## 🏗️ System Architecture
 
-![CloudSentinel-XAI Architecture](assets/Architecture.png)
+![CloudSentinel-XAI Architecture](assets/Architecture_.png)
 
 At a glance, telemetry flows through five layers:
 
