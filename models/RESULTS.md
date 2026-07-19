@@ -378,6 +378,38 @@ be operationally too late — **state this**.
 
 ---
 
+### 6.1 Standalone XGBoost phase classification **[in-distribution]**
+
+The supervised `threat_category` classifier on its own, independent of the graph and
+risk layers. This is the number §7 and §8.1 refer to as "the 0.91 in-distribution
+accuracy"; it was previously only cited, never stated here.
+
+| Metric | Value |
+|---|---|
+| Test accuracy | **0.9106** |
+| Test macro F1 | **0.9019** |
+| Classes | 10 (`Normal` + 9 attack phases) |
+| Train / test rows | 369 / 369 |
+
+Source: `models/xgboost_classifier.pkl` (`test_accuracy`, `test_macro_f1`), trained
+2026-07-14, `Datasets/attacks_fast` → `Datasets/attacks_slow`. Recorded independently
+at `models/README.md:192`.
+
+**Three caveats, all required when quoting this:**
+
+1. **It is multi-class phase accuracy, not intrusion detection.** It answers "which
+   phase is this event," not "is this entity compromised" — §0.1's positive. It is not
+   comparable to any row in §2–§4.
+2. **§8.1 applies in full.** The four labeled-only features are label proxies, so this
+   figure is inflated by an unquantified amount. §8.1's retraining item must land
+   before this is a paper claim.
+3. **In-distribution only.** Train and test are different seeds/pacing of the same 4
+   scenario templates, so this measures recognition of known scripted patterns. §7's
+   LOSO mean ROC 0.871 — and the `insider_privilege_abuse` blind spot at 0.515 — is
+   the generalization result. **Never state this number without §7 beside it.**
+
+---
+
 ## 7. Corroboration — leave-one-scenario-out **[Phase 3]**
 
 `models/evaluate_loso.py`, binary `1 − P(Normal)` framing.
@@ -390,7 +422,7 @@ be operationally too late — **state this**.
 | **`insider_privilege_abuse`** | **0.515** | 0.038 |
 | **MEAN** | **0.871** | 0.623 |
 
-**State this next to the 0.91 in-distribution accuracy.** 3/4 unseen scenarios
+**State this next to the 0.91 in-distribution accuracy (§6.1).** 3/4 unseen scenarios
 generalize (0.97–0.999); `insider_privilege_abuse` is a genuine blind spot (~random,
 47/48 events classified `Normal`) — an insider abusing already-valid privileges is
 behaviorally indistinguishable from benign to this feature set. **§3.3's independent
