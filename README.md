@@ -21,28 +21,28 @@ CloudSentinel-XAI ingests **AWS CloudTrail**, **Azure AD Audit / Sign-in**, and 
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Why CloudSentinel-XAI](#why-cloudsentinel-xai)
-- [Key Features](#key-features)
-- [System Architecture](#system-architecture)
-- [How It Works](#how-it-works)
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [One-Time Setup](#one-time-setup)
-- [Running the Full Stack](#running-the-full-stack)
-- [API Reference](#api-reference)
-- [Grafana Dashboards](#grafana-dashboards)
-- [Synthetic Dataset Generator](#synthetic-dataset-generator)
-- [Model Performance](#model-performance)
-- [Testing](#testing)
-- [Troubleshooting](#troubleshooting)
-- [Project Status & Roadmap](#project-status--roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+- [🧭 Overview](#overview)
+- [🎯 Why CloudSentinel-XAI](#why-cloudsentinel-xai)
+- [✨ Key Features](#key-features)
+- [🏗️ System Architecture](#system-architecture)
+- [⚙️ How It Works](#how-it-works)
+- [🛠️ Tech Stack](#tech-stack)
+- [📂 Project Structure](#project-structure)
+- [🔧 One-Time Setup](#one-time-setup)
+- [🚀 Running the Full Stack](#running-the-full-stack)
+- [📡 API Reference](#api-reference)
+- [📊 Grafana Dashboards](#grafana-dashboards)
+- [🧪 Synthetic Dataset Generator](#synthetic-dataset-generator)
+- [📈 Model Performance](#model-performance)
+- [✅ Testing](#testing)
+- [🩺 Troubleshooting](#troubleshooting)
+- [🗺️ Project Status & Roadmap](#project-status--roadmap)
+- [🤝 Contributing](#contributing)
+- [📄 License](#license)
 
 ---
 
-## Overview
+## 🧭 Overview
 
 CloudSentinel-XAI is a high-throughput, multi-cloud Zero-Trust security framework that:
 
@@ -56,7 +56,7 @@ It is designed for Security Operations Centers (SOCs) and cloud security teams t
 
 ---
 
-## Why CloudSentinel-XAI
+## 🎯 Why CloudSentinel-XAI
 
 Most cloud-native detection tools operate per-cloud and treat explanation as an afterthought. CloudSentinel-XAI is built around three specific, deliberately engineered ideas:
 
@@ -68,7 +68,7 @@ The project is also transparent about where it is still weak — see [Model Perf
 
 ---
 
-## Key Features
+## ✨ Key Features
 
 - Multi-cloud audit log ingestion (AWS CloudTrail, Azure AD Audit/Sign-in, GCP Cloud Audit Logs), raw or pre-normalized
 - High-speed, schema-unifying log normalization pipeline with GeoIP/ASN and Tor exit-node enrichment
@@ -86,7 +86,7 @@ The project is also transparent about where it is still weak — see [Model Perf
 
 ---
 
-## System Architecture
+## 🏗️ System Architecture
 
 ![CloudSentinel-XAI Architecture](assets/Architecture.png)
 
@@ -103,7 +103,7 @@ At a glance, telemetry flows through five layers:
 
 ---
 
-## How It Works
+## ⚙️ How It Works
 
 1. **Ingest** — `POST /api/v1/ingest/raw` accepts raw provider JSON (AWS/Azure/GCP, auto-detected per record) and normalizes it through the parser pipeline first. `POST /api/v1/ingest` accepts records that are already in the normalized `UnifiedLogModel` shape.
 2. **Enrich & Normalize** — Each event is parsed into a `UnifiedLogModel`, enriched with GeoLite2 ASN/country lookups and Tor exit-node matching, and reduced to a shared feature set.
@@ -116,7 +116,7 @@ At a glance, telemetry flows through five layers:
 
 ---
 
-## Tech Stack
+## 🛠️ Tech Stack
 
 | Category | Technologies |
 |---|---|
@@ -133,7 +133,7 @@ At a glance, telemetry flows through five layers:
 
 ---
 
-## Project Structure
+## 📂 Project Structure
 
 ```
 CloudSentinel-XAI/
@@ -192,7 +192,7 @@ Not part of the active pipeline, kept for reference: `demo_simulator.py` (emits 
 
 ---
 
-## One-Time Setup
+## 🔧 One-Time Setup
 
 Run every command from the repository root. Commands are shown for Windows/PowerShell; on macOS/Linux use `.venv/bin/activate` instead of `.venv\Scripts\activate` and drop the `.exe` suffixes.
 
@@ -259,7 +259,7 @@ python models/train_xgboost.py --train-dir Datasets/attacks_fast --test-dir Data
 
 ---
 
-## Running the Full Stack
+## 🚀 Running the Full Stack
 
 The application, Prometheus, Loki, and the demo traffic feed are four independent long-running processes. Start them in this order, in separate terminals, confirming each is healthy before starting the next.
 
@@ -343,7 +343,7 @@ This pushes every dashboard JSON to Grafana's HTTP API under a single "CloudSent
 
 ---
 
-## API Reference
+## 📡 API Reference
 
 ### Ingest raw multi-cloud logs
 
@@ -416,7 +416,7 @@ Prometheus-format metrics, scraped automatically once Prometheus is pointed at t
 
 ---
 
-## Grafana Dashboards
+## 📊 Grafana Dashboards
 
 All dashboards live under a single "CloudSentinel-XAI" folder and cross-link to each other via a "Switch Dashboard" panel, so an analyst can move between them without leaving Grafana.
 
@@ -463,7 +463,7 @@ Deploy or re-sync all six with `python grafana/deploy_dashboards.py` (see [Runni
 
 ---
 
-## Synthetic Dataset Generator
+## 🧪 Synthetic Dataset Generator
 
 CloudSentinel-XAI ships a research-grade synthetic multi-cloud IAM dataset generator, purpose-built to avoid the label-leakage problems common in synthetic security datasets.
 
@@ -488,7 +488,7 @@ See [`dataset_script/readme.md`](dataset_script/readme.md) for full generator do
 
 ---
 
-## Model Performance
+## 📈 Model Performance
 
 Current numbers from the latest ablation study (`models/ablation_results.csv`) and leave-one-scenario-out evaluation (`models/loso_results.csv`), reported honestly rather than cherry-picked, since this is a research project first.
 
@@ -520,7 +520,7 @@ Three of four unseen attack types generalize well. **Insider privilege abuse is 
 
 ---
 
-## Testing
+## ✅ Testing
 
 ```bash
 PYTHONPATH=. pytest -q
@@ -535,7 +535,7 @@ The test suite runs entirely in bypass mode (no trained models required), valida
 
 ---
 
-## Troubleshooting
+## 🩺 Troubleshooting
 
 **Dashboards show "No data" / panels blank:**
 
@@ -559,7 +559,7 @@ Narratives still get logged locally and metrics still flow when this happens occ
 
 ---
 
-## Project Status & Roadmap
+## 🗺️ Project Status & Roadmap
 
 Currently working end-to-end: multi-cloud ingestion and normalization, identity stitching, parallel ML inference with SHAP, the faithfulness gate, LLM narration, and all six Grafana dashboards backed by real pipeline metrics.
 
@@ -571,13 +571,13 @@ Known open items:
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
 Issues and pull requests are welcome. Please run the test suite (`PYTHONPATH=. pytest -q`) before submitting, and keep dataset-generation changes leakage-safe (`python dataset_script/check_leakage.py`).
 
 ---
 
-## License
+## 📄 License
 
 TBD.
 
